@@ -5,6 +5,10 @@
 # Cargo.lock IS committed. This crate produces a binary, and for binaries a
 # committed lockfile is what makes a build reproducible. (Libraries omit it.)
 
+# --- not for publication ----------------------------------------------------
+# Keyrock's own hiring material; the repo is public.
+docs/
+
 # --- secrets ---------------------------------------------------------------
 .env
 .env.*
