@@ -5,54 +5,38 @@
 //! integration tests in `tests/` can actually reach.
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use keyrock_case_study::{config::Config, greeting, telemetry};
+use clap::Parser;
+use keyrock_case_study::{config::Config, telemetry};
+use tracing::info;
 
 #[derive(Parser)]
 #[command(name = "keyrock-case-study", version, about = "Keyrock case study")]
 struct Cli {
-    /// Log at DEBUG instead of the configured level.
-    #[arg(short, long, global = true)]
-    verbose: bool,
+    /// Traded pair to aggregate, e.g. "ethbtc". Overrides KEYROCK_PAIR.
+    #[arg(long)]
+    pair: Option<String>,
 
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Print a greeting — the smoke test that the binary runs at all.
-    Hello {
-        /// Who to greet.
-        #[arg(default_value = "world")]
-        name: String,
-    },
-    /// Report resolved configuration and environment health.
-    Doctor,
+    /// Port the service binds to. Overrides KEYROCK_PORT.
+    #[arg(long)]
+    port: Option<u16>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = Config::from_env()?;
+    let mut config = Config::from_env()?;
 
-    telemetry::init(if cli.verbose {
-        "debug"
-    } else {
-        &config.log_level
-    });
-
-    match cli.command {
-        Command::Hello { name } => {
-            // stdout: the answer. Logs go to stderr (see telemetry.rs).
-            println!("{}", greeting(&name));
-        }
-        Command::Doctor => {
-            println!("version:   {}", keyrock_case_study::VERSION);
-            println!("log_level: {}", config.log_level);
-            println!("host:      {}", config.host);
-            println!("port:      {}", config.port);
-        }
+    // CLI flags are the more specific, closer-to-the-call-site input, so
+    // they win over the env-sourced value when both are given.
+    if let Some(pair) = cli.pair {
+        config.pair = pair;
     }
+    if let Some(port) = cli.port {
+        config.port = port;
+    }
+
+    telemetry::init(&config.log_level);
+
+    info!(pair = %config.pair, port = %config.port, "starting");
 
     Ok(())
 }

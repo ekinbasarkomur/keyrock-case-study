@@ -21,6 +21,8 @@ pub struct Config {
     /// by the `127.0.0.1:` prefix on compose's `ports:` line, not by this.
     pub host: String,
     pub port: u16,
+    /// Traded pair the aggregator streams, e.g. "ethbtc".
+    pub pair: String,
 }
 
 impl Default for Config {
@@ -28,7 +30,8 @@ impl Default for Config {
         Self {
             log_level: "info".to_string(),
             host: "127.0.0.1".to_string(),
-            port: 8080,
+            port: 50051,
+            pair: "ethbtc".to_string(),
         }
     }
 }
@@ -50,6 +53,7 @@ impl Config {
         Ok(Self {
             log_level: env::var(format!("{ENV_PREFIX}LOG_LEVEL")).unwrap_or(defaults.log_level),
             host: env::var(format!("{ENV_PREFIX}HOST")).unwrap_or(defaults.host),
+            pair: env::var(format!("{ENV_PREFIX}PAIR")).unwrap_or(defaults.pair),
             port,
         })
     }
@@ -68,8 +72,9 @@ mod tests {
     #[test]
     fn defaults_are_usable_with_no_environment() {
         let c = Config::default();
-        assert_eq!(c.port, 8080);
+        assert_eq!(c.port, 50051);
         assert_eq!(c.host, "127.0.0.1");
+        assert_eq!(c.pair, "ethbtc");
     }
 
     #[test]
