@@ -14,9 +14,13 @@
 # Agent scaffolding and personal working notes. These are how the work gets
 # done, not the work itself; the reviewer gets the code, the tests, and the
 # README.
+#
+# specs/ is NOT in this list, on purpose: unlike the rest of this block, the
+# spec packets (inputs/spec.md/plan.md/tasks.md per step) are tracked and
+# committed, so the commit history shows the reasoning behind each step
+# alongside the code it produced.
 .claude/
 CLAUDE.md
-specs/
 NOTES.md
 scratch/
 
