@@ -53,7 +53,7 @@ FROM debian:bookworm-slim
 # feature bundles its own root certs, so TLS works without a system CA store.
 # Nothing else in this stage needs apt, so there is no apt block at all.
 
-# Non-root, matching the uid used by the other services in this workspace.
+# Non-root, fixed uid above the typical system-account range.
 RUN useradd --create-home --uid 10001 app
 
 WORKDIR /app

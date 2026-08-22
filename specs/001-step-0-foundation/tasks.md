@@ -48,21 +48,23 @@ regression riding along with it.
   - `git diff Cargo.lock` shows the lockfile changed (proves `cargo add`
     actually resolved and locked versions, not just edited the manifest).
 - Done when:
-  - `Cargo.toml` lists all four original dependencies plus every new one from
-    the Tooling table in `CLAUDE.md` (minus `hdrhistogram`, which is out of
-    scope for step 0 per `spec.md`).
+  - `Cargo.toml` lists all four original dependencies plus every new one in
+    the `cargo add` list above (minus `hdrhistogram`, which is out of scope
+    for step 0 per `spec.md`).
 
 ### 1.2 Add `proto/orderbook.proto`
 - Files or areas: `proto/orderbook.proto` (new)
-- Change: Create the file containing exactly the protobuf schema quoted
-  verbatim in `CLAUDE.md`'s "gRPC contract" section (`syntax = "proto3"`,
-  `package orderbook`, `OrderbookAggregator` service with the single
-  `BookSummary` RPC, `Empty`, `Summary`, `Level` messages). Copy it
-  byte-for-byte — this file is never hand-edited again after this task lands.
+- Change: Create the file containing exactly the protobuf schema specified
+  by the case-study brief: `syntax = "proto3"`, `package orderbook`, an
+  `OrderbookAggregator` service with a single `BookSummary` RPC (`Empty` →
+  `stream Summary`), and `Empty`/`Summary`/`Level` messages (`spread` as
+  `double`; `bids`/`asks` as `repeated Level`; `Level` as
+  `exchange`/`price`/`amount`). Copy it byte-for-byte — this file is never
+  hand-edited again after this task lands.
 - Verification:
-  - `diff` the new file's message/service definitions against the schema
-    block in `CLAUDE.md` by eye; there must be zero deviation (no renamed
-    field, no added field, no type change).
+  - Check the new file's message/service definitions against the brief's
+    schema by eye; there must be zero deviation (no renamed field, no added
+    field, no type change).
 - Done when:
   - `proto/orderbook.proto` exists and matches the brief's schema exactly.
 
@@ -272,9 +274,8 @@ changes in this phase.
   block from the runtime (`debian:bookworm-slim`) stage entirely, and its
   explanatory comment. Replace the comment with a one-line note that
   `tokio-tungstenite`'s `rustls-tls-webpki-roots` feature bundles its own
-  root certs, so the runtime image needs no system CA package (per `CLAUDE.md`
-  Trap #6) — nothing else in the runtime stage uses apt, so no apt block is
-  needed at all.
+  root certs, so the runtime image needs no system CA package — nothing else
+  in the runtime stage uses apt, so no apt block is needed at all.
 - Verification:
   - `docker compose build` still succeeds without the apt step.
   - `docker history keyrock-case-study:local` (or equivalent) shows no apt
@@ -335,8 +336,8 @@ changes in this phase.
   compose up --build` as a valid way to run the binary once (it starts, logs,
   and exits — still not a server), alongside the existing `docker compose run
   --rm app <cmd>` examples. No other change to `compose.yml` — the
-  `KEYROCK_LOG_LEVEL` environment wiring and the "stays off the `echo`
-  network" comment block are unchanged, since `Config::from_env()` was kept
+  `KEYROCK_LOG_LEVEL` environment wiring and the "stays off external
+  networks" comment block are unchanged, since `Config::from_env()` was kept
   (per `spec.md`'s decided config shape), not replaced.
 - Verification:
   - Read the updated comment back; confirm `docker compose run --rm app

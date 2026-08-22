@@ -8,11 +8,11 @@ updated_at: "2026-08-22"
 created_by: "spec-synthesizer"
 creation_mode: "human-brief"
 source_inputs:
-  - "inputs/human.md"
+  - "inputs/human.md (kept locally, gitignored — raw briefs aren't published)"
 source_agents: []
 goal: "Land a buildable, containerised, dependency-complete scaffold for the 11-step Keyrock order-book aggregator, adapted from — not layered onto — the pre-existing generic CLI scaffold."
 purpose: "Every later step (websocket feeds, merge, gRPC server) needs a crate that already resolves its full dependency graph and already compiles a proto into Rust, so version conflicts and build-pipeline surprises surface once, now, instead of mid-implementation."
-parent_request: "user's step-0 foundation brief, 2026-08-22"
+parent_request: "step-0 foundation brief, 2026-08-22"
 related_paths:
   - "Cargo.toml"
   - "src/main.rs"
@@ -39,11 +39,11 @@ The repo has a working scaffold (library/binary split, tests, container) built
 harness, but its shape — `hello`/`doctor` subcommands, `KEYROCK_`-prefixed
 env-var configuration, a Docker image with nothing to run — has nothing to do
 with the actual problem: a service that will eventually stream a merged
-Binance+Bitstamp order book over gRPC. Step 0 of the 11-step build order
-(documented in `CLAUDE.md`) is where the crate's dependency graph, its proto
-build pipeline, and its container shape get established for good — before any
-websocket or gRPC logic exists. This spec is the plan for that step; no code
-should land until it's approved.
+Binance+Bitstamp order book over gRPC. Step 0 of the project's 11-step build
+order is where the crate's dependency graph, its proto build pipeline, and
+its container shape get established for good — before any websocket or gRPC
+logic exists. This spec is the plan for that step; no code should land until
+it's approved.
 
 ## Goal
 
@@ -78,20 +78,19 @@ on a version choice made under time pressure later).
 - Any websocket client code (`src/exchange/*` — arrives at steps 1 and 4).
 - Any gRPC service implementation (`src/server.rs` — arrives at step 2).
 - `merge.rs`, `book.rs`/`model.rs`, `src/aggregator.rs` — arrive with the
-  steps that need them. No stub files, no `todo!()` — CLAUDE.md is explicit
-  that these only produce dead-code warnings for no benefit.
+  steps that need them. No stub files, no `todo!()` — they'd only produce
+  dead-code warnings for no benefit.
 - A `HEALTHCHECK` in the Dockerfile — there is still no long-running server
-  to probe; the commented-out block stays commented out (Trap #4 in
-  `CLAUDE.md`).
-- Joining the shared `echo` Docker network — this project deliberately stays
-  off it (Trap #3); `compose.yml` keeps compose's default project network.
+  to probe; the commented-out block stays commented out.
+- Joining a shared external Docker network — this project deliberately stays
+  off any such network so it runs for a reviewer with no manual setup;
+  `compose.yml` keeps compose's default project network.
 - Deciding the fixed-point price/amount scale, the crossed-book behaviour, or
-  the sort tie-break — those are step-5 questions per the build order in
-  `CLAUDE.md`; nothing about them needs deciding here.
-- `hdrhistogram` — listed in `CLAUDE.md`'s Tooling table for step 8's latency
-  measurement, but the human brief's `cargo add` list for step 0 does not
-  include it. Step 0 adds only what the brief's dependency list names;
-  `hdrhistogram` lands when step 8 needs it.
+  the sort tie-break — those are step-5 questions for this project's later
+  build order; nothing about them needs deciding here.
+- `hdrhistogram` — needed for step 8's latency measurement, but not part of
+  step 0's dependency list (see Proposed Design). Step 0 adds only what that
+  list names; `hdrhistogram` lands when step 8 needs it.
 
 ## Current State
 
@@ -126,8 +125,7 @@ Verified by reading the files directly, not assumed:
   `CMD ["--help"]`.
 - **`compose.yml`** — CLI-runner shape (`docker compose run --rm app hello
   Keyrock`), sets `environment: KEYROCK_LOG_LEVEL: ${KEYROCK_LOG_LEVEL:-info}`,
-  no `ports:`, comments explain why the `echo` network is deliberately not
-  joined.
+  no `ports:`, comments explain why no external Docker network is joined.
 - **`.env.example`** — templates `KEYROCK_LOG_LEVEL`/`KEYROCK_HOST`/`KEYROCK_PORT`.
 - **`README.md`** — documents the `hello`/`doctor` commands and the
   `KEYROCK_*` env vars; no proto/gRPC mention yet.
@@ -185,11 +183,11 @@ compile against 0.14's split.
 ### `src/config.rs` — **decided 2026-08-22: keep env-var config, layer CLI flags on top**
 
 The env-var design in `Config::from_env()` stays — it was a deliberate,
-already-tested choice (`CLAUDE.md`'s "Architecture Facts": "config has a
-working default for every field"), and the human chose to extend it rather
-than replace it. `Config` gains a fifth field, `pair`, read from a new
-`KEYROCK_PAIR` env var, defaulting to `"ethbtc"`. The default `port` changes
-from `8080` to `50051` — the brief's own default, and the port this service
+already-tested choice (config has a working default for every field), and
+this spec extends it rather than replacing it. `Config` gains a fifth
+field, `pair`, read from a new `KEYROCK_PAIR` env var, defaulting to
+`"ethbtc"`. The default `port` changes from `8080` to `50051` — the brief's
+own default, and the port this service
 will actually bind to once the gRPC server exists in a later step, so there's
 no reason for step 0's default to disagree with it. `host`/`log_level` are
 unchanged; `ConfigError::InvalidPort` stays, since `KEYROCK_PORT` is still a
@@ -237,8 +235,8 @@ does, so step 0 doesn't touch it), log one `info!` line in the form
 `--verbose` flag is dropped — it wasn't part of the brief's two-flag CLI
 surface, and `RUST_LOG` already covers the same need without adding a flag
 nothing asked for. `Command::Hello`/`Command::Doctor`, `greeting()` in
-`src/lib.rs`, and its unit test are deleted — CLAUDE.md already says this
-placeholder code is meant to disappear, not grow neighbours. The unused
+`src/lib.rs`, and its unit test are deleted — placeholder code is meant to
+disappear when the real problem lands, not grow neighbours. The unused
 `VERSION` const in `src/lib.rs` goes with it: its only two callers
 (`greeting()` and the `doctor` printout) are both gone, and clap's own
 `#[command(version)]` already reads the crate version independently.
@@ -287,8 +285,8 @@ Three changes:
    re-run for no reason.
 2. **`ca-certificates` apt install — decided 2026-08-22: drop it.** Now that
    `tokio-tungstenite`'s `rustls-tls-webpki-roots` feature is a dependency,
-   it bundles its own root certs specifically so the runtime image needs no
-   system CA package (`CLAUDE.md` Trap #6 already documents this tradeoff).
+   it bundles its own root certs, so the runtime image needs no system CA
+   package once TLS connections actually happen in a later step.
    Step 0 makes no TLS connection itself, but there's no reason to carry a
    package the design has already committed to not needing — remove the
    `apt-get install ca-certificates` line and the `apt-get update`/cleanup
@@ -378,8 +376,8 @@ websocket and gRPC logic arrive in later steps.
 - The stdout/answer vs. stderr/logs split (`src/telemetry.rs`) stays intact
   even though there's no "answer" yet in this step — logs still go to
   stderr only.
-- The project stays off the shared `echo` Docker network (Trap #3) and adds
-  no `HEALTHCHECK` (Trap #4) — neither applies until a real server exists.
+- The project stays off any shared external Docker network and adds no
+  `HEALTHCHECK` — neither applies until a real server exists.
 
 ## Risks and Tradeoffs
 
@@ -400,7 +398,7 @@ websocket and gRPC logic arrive in later steps.
   brief's own reasoning — the tradeoff is that this step's `Cargo.lock` diff
   is large and mostly unrelated to anything this step's own code exercises
   yet, which could look like scope creep to a reviewer skimming the diff
-  without the build-order context in `CLAUDE.md`.
+  without the project's step-by-step build-order context.
 
 ## Testing Strategy
 
@@ -438,7 +436,7 @@ Optional supporting checks:
   site used by the test).
 - `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`, per
   the repo's standing verification rule — necessary but not sufficient on
-  their own per `.claude/rules/testing.md`.
+  their own; they don't prove the behavior above actually works.
 
 ## Rollback Plan
 
@@ -451,8 +449,8 @@ the pre-existing `hello`/`doctor` scaffold exactly as it was.
 
 ## Open Questions
 
-None currently open. All four raised during drafting were answered by the
-human on 2026-08-22 and are reflected directly in Proposed Design above:
+None currently open. All four raised during drafting were answered on
+2026-08-22 and are reflected directly in Proposed Design above:
 
 - **Config shape** → keep `Config::from_env()`, add a `pair` field
   (`KEYROCK_PAIR`), CLI flags (`--pair`/`--port`, both `Option<T>`) override
@@ -461,6 +459,6 @@ human on 2026-08-22 and are reflected directly in Proposed Design above:
 - **`.env.example`** → keep it, extended with `KEYROCK_PAIR` and the new
   `50051` default (this follows mechanically once Config-shape was decided
   the way it was — `.env.example` documents variables that are still real).
-- **Timeline** → no hard deadline; proceed through all 11 steps in
-  `CLAUDE.md`'s build order at a normal pace, latency measurement and
-  polish included. No effect on step 0's own scope.
+- **Timeline** → no hard deadline; proceed through all 11 steps of this
+  project's build order at a normal pace, latency measurement and polish
+  included. No effect on step 0's own scope.

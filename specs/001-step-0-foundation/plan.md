@@ -173,9 +173,9 @@ before continuing rather than improvising past it:
   `tokio-tungstenite` version combination that conflicts, forcing a
   dependency choice spec.md didn't make.
 - Any phase turns out to need touching `rust-toolchain.toml`, the
-  Dockerfile's `FROM` line, joining the `echo` network, or adding a
+  Dockerfile's `FROM` line, joining an external Docker network, or adding a
   `HEALTHCHECK` — all explicitly out of scope per spec.md.
 - The precedence test (flag overrides env var) fails in a way that
   suggests the merge design itself (not just an implementation bug) is
   wrong — that's a config-shape question spec.md already closed, and
-  reopening it needs the human, not a silent workaround.
+  reopening it needs a design sign-off, not a silent workaround.
