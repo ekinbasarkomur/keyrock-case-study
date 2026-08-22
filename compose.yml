@@ -1,0 +1,37 @@
+# keyrock-case-study as a CLI runner:
+#
+#     docker compose run --rm app hello Keyrock
+#     docker compose run --rm app doctor
+#
+# There is no long-running service yet, so there is nothing to `up -d`. When a
+# server lands, add `command:`, a `ports:` line, and a healthcheck.
+
+services:
+  app:
+    build: .
+    image: keyrock-case-study:local
+    # A fixed container_name gives host `docker` commands a stable handle
+    # instead of compose's <project>-<service>-<n> form.
+    container_name: keyrock-case-study
+
+    env_file:
+      - path: .env
+        required: false
+
+    environment:
+      KEYROCK_LOG_LEVEL: ${KEYROCK_LOG_LEVEL:-info}
+
+    # NOTE FOR ANYONE COMPARING THIS TO THE OTHER PROJECTS IN THIS WORKSPACE:
+    # they all join a shared EXTERNAL network named `echo`, which has to be
+    # created by hand (`docker network create echo`). That is right for a
+    # homelab where services talk to each other, and wrong here — this repo is
+    # meant to be cloned and run by someone who does not have that network, and
+    # an external network that does not exist fails the run immediately with
+    # "network echo declared as external, but could not be found".
+    #
+    # So: compose's own default project network. Nothing to create first.
+
+    # When a server is added, publish it on loopback only:
+    #   ports:
+    #     - "127.0.0.1:8080:8080"
+    # and set KEYROCK_HOST=0.0.0.0 so the process binds inside the container.

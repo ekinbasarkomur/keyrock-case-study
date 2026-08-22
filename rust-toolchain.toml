@@ -1,0 +1,7 @@
+# Pins the toolchain for host builds so `cargo build` uses the same compiler as
+# the Docker image (see the FROM line in Dockerfile — keep these two in sync).
+#
+# rustup reads this automatically and installs the version if it is missing.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

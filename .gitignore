@@ -1,0 +1,27 @@
+# --- Rust ------------------------------------------------------------------
+/target/
+**/*.rs.bk
+
+# Cargo.lock IS committed. This crate produces a binary, and for binaries a
+# committed lockfile is what makes a build reproducible. (Libraries omit it.)
+
+# --- secrets ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- local working material, deliberately not part of the deliverable ------
+# Agent scaffolding and personal working notes. These are how the work gets
+# done, not the work itself; the reviewer gets the code, the tests, and the
+# README.
+.claude/
+CLAUDE.md
+specs/
+NOTES.md
+scratch/
+
+# --- OS / editor -----------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp

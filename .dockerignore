@@ -1,0 +1,23 @@
+# target/ is the single most important entry here: a debug build tree is
+# gigabytes, and without this line every `docker build` uploads all of it as
+# build context before doing anything.
+target/
+
+.git/
+.gitignore
+.env
+.env.*
+!.env.example
+
+# Agent scaffolding and working notes — not part of the deliverable, and not
+# something the image needs.
+.claude/
+CLAUDE.md
+specs/
+docs/
+
+.DS_Store
+Dockerfile
+compose.yml
+.dockerignore
+README.md
