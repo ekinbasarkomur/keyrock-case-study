@@ -79,8 +79,12 @@ mod tests {
 
     #[test]
     fn invalid_port_is_an_error_not_a_fallback() {
-        // SAFETY: single-threaded test; see the note in tests/cli.rs about why
-        // env-mutating tests are kept out of the parallel suite where possible.
+        // SAFETY: cargo test runs tests within a binary in parallel by default,
+        // so "no other test touches the environment concurrently" is not a
+        // guarantee — it happens to be true only because this is currently the
+        // one env-mutating test in this binary. If a second one is added, it
+        // needs its own synchronization (e.g. a shared mutex), not to inherit
+        // this comment's assumption.
         unsafe { env::set_var("KEYROCK_PORT", "not-a-number") };
         let err = Config::from_env().unwrap_err();
         unsafe { env::remove_var("KEYROCK_PORT") };
