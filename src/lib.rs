@@ -10,3 +10,11 @@
 
 pub mod config;
 pub mod telemetry;
+
+/// Generated from `proto/orderbook.proto`. Nothing consumes these types
+/// until the gRPC server lands; including them here means the generated
+/// code is actually compiled, so the build pipeline is verified rather
+/// than assumed.
+pub mod orderbook {
+    tonic::include_proto!("orderbook");
+}
