@@ -44,8 +44,7 @@ COPY src/ ./src/
 # `touch` forces the timestamp forward so the real source is always rebuilt.
 # This failure is silent — the image builds, runs, and does nothing.
 RUN touch src/main.rs src/lib.rs \
-    && cargo build --release \
-    && strip target/release/keyrock-case-study
+    && cargo build --release
 
 # --- runtime ----------------------------------------------------------------
 FROM debian:bookworm-slim
