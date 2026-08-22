@@ -6,10 +6,11 @@ feeds, merges the two books for one traded pair, and streams the spread plus
 the top 10 bids/asks over gRPC (`proto/orderbook.proto`).
 
 **None of that logic exists yet.** This is step 0 of an 11-step build order:
-a dependency-complete, containerised skeleton with a real CLI, a real config
-system, and a working proto build pipeline, but no websocket client, no
-merge logic, and no gRPC service. Later steps build on this without
-reshaping it.
+a containerised skeleton with the dependencies the build is currently
+expected to need, a real CLI, a real config system, and a proto build
+pipeline whose output is actually compiled (not just generated — see
+Layout), but no websocket client, no merge logic, and no gRPC service.
+Later steps build on this without reshaping it.
 
 ## Requirements
 
@@ -49,9 +50,11 @@ proto/orderbook.proto  the gRPC schema — copied verbatim from the brief,
                         never hand-edited (see "What would change for
                         production" below for any opinion about it)
 build.rs                compiles proto/orderbook.proto to Rust via
-                        tonic-prost-build; nothing consumes the generated
-                        types yet — that lands with the gRPC server step
-src/lib.rs              library root — everything testable lives here
+                        tonic-prost-build
+src/lib.rs              library root; also pulls in the generated proto
+                        types via tonic::include_proto! so the build
+                        pipeline is verified, not just assumed — nothing
+                        calls them yet, that starts with the gRPC server step
 src/config.rs           configuration, read from the environment
 src/telemetry.rs        tracing setup (logs to stderr)
 src/main.rs             CLI entry point — parses arguments and delegates
@@ -111,7 +114,15 @@ When a server lands in a later step, this file gains a `command:`, a
 
 ## What would change for production
 
-<!-- Placeholder — nothing schema-related has come up yet at this step. Any
-     opinion about proto/orderbook.proto's shape belongs here, never as an
-     edit to the .proto file itself, since the reviewer tests against their
-     own copy of it. -->
+**Pair selection belongs on the request, not on the process.** `BookSummary`
+takes `Empty` — the client has no way to ask for a pair, so the pair has to
+be fixed at startup instead, and running a second pair means running a
+second process. That's a simple isolation boundary and it's fine for one
+pair, but it doesn't scale by multiplexing: Binance alone allows up to 1024
+streams on a single websocket connection, so a few hundred pairs under this
+model burns a few hundred connections (and processes) to do work one
+connection could plausibly do. A production version of this schema would put
+the pair on the request message and let one service instance fan a single
+upstream connection out across many books. That's a schema change, which is
+why it's noted here rather than edited into `proto/orderbook.proto` — the
+given schema is treated as fixed, per the brief.
