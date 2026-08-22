@@ -13,10 +13,22 @@ FROM rust:1.97-slim-bookworm AS builder
 
 WORKDIR /build
 
+# protobuf-compiler provides `protoc`, which build.rs shells out to via
+# tonic-prost-build. The crate does not bundle it (confirmed empirically:
+# the stub build below fails without this line, with prost-build's own
+# "Could not find `protoc`" error).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
 # --- dependency layer -------------------------------------------------------
 # Copy ONLY the manifests first and build against a stub source tree, so the
 # (slow) dependency compile is cached and does not repeat on every source edit.
-COPY Cargo.toml Cargo.lock ./
+# build.rs runs on EVERY `cargo build`, including this stub-source compile —
+# it is not conditional on src/ being real — so it and the proto/ tree it
+# reads must be present here too, or this stub build fails outright.
+COPY build.rs Cargo.toml Cargo.lock ./
+COPY proto/ ./proto/
 RUN mkdir -p src \
     && echo 'fn main() {}' > src/main.rs \
     && echo '' > src/lib.rs \
@@ -38,13 +50,9 @@ RUN touch src/main.rs src/lib.rs \
 # --- runtime ----------------------------------------------------------------
 FROM debian:bookworm-slim
 
-# ca-certificates is the one thing a networked Rust binary almost always needs
-# and the slim image does not ship; without it every TLS call fails with an
-# unhelpful certificate error. Apt lists are removed in the same layer so they
-# do not end up in the image.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# No ca-certificates package here: tokio-tungstenite's rustls-tls-webpki-roots
+# feature bundles its own root certs, so TLS works without a system CA store.
+# Nothing else in this stage needs apt, so there is no apt block at all.
 
 # Non-root, matching the uid used by the other services in this workspace.
 RUN useradd --create-home --uid 10001 app
@@ -66,4 +74,4 @@ USER app
 # (that needs `curl` added to the apt line above — the slim image has none).
 
 ENTRYPOINT ["keyrock-case-study"]
-CMD ["--help"]
+CMD []

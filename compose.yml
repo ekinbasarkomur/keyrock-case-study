@@ -1,7 +1,9 @@
-# keyrock-case-study as a CLI runner:
+# keyrock-case-study as a container:
 #
-#     docker compose run --rm app hello Keyrock
-#     docker compose run --rm app doctor
+#     docker compose up --build       # runs with defaults, logs, exits 0 —
+#                                      # the command step 0's acceptance
+#                                      # criterion actually checks
+#     docker compose run --rm app --pair btcusd --port 12345
 #
 # There is no long-running service yet, so there is nothing to `up -d`. When a
 # server lands, add `command:`, a `ports:` line, and a healthcheck.
