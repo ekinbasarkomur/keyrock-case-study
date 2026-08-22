@@ -1,6 +1,4 @@
-# target/ is the single most important entry here: a debug build tree is
-# gigabytes, and without this line every `docker build` uploads all of it as
-# build context before doing anything.
+# Without this, every `docker build` uploads the whole build tree as context.
 target/
 
 .git/

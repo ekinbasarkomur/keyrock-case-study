@@ -2,8 +2,7 @@
 /target/
 **/*.rs.bk
 
-# Cargo.lock IS committed. This crate produces a binary, and for binaries a
-# committed lockfile is what makes a build reproducible. (Libraries omit it.)
+# Cargo.lock IS committed — this crate is a binary, not a library.
 
 # --- not for publication ----------------------------------------------------
 # Keyrock's own hiring material; the repo is public.
@@ -14,15 +13,8 @@ docs/
 .env.*
 !.env.example
 
-# --- local working material, deliberately not part of the deliverable ------
-# Agent scaffolding and personal working notes. These are how the work gets
-# done, not the work itself; the reviewer gets the code, the tests, and the
-# README.
-#
-# specs/ is NOT in this list, on purpose: unlike the rest of this block, the
-# spec packets (inputs/spec.md/plan.md/tasks.md per step) are tracked and
-# committed, so the commit history shows the reasoning behind each step
-# alongside the code it produced.
+# --- local working material -------------------------------------------------
+# specs/ is deliberately NOT here — spec packets are tracked, unlike the rest.
 .claude/
 CLAUDE.md
 NOTES.md
