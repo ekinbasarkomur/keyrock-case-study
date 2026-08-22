@@ -7,6 +7,8 @@
 # --- not for publication ----------------------------------------------------
 # Keyrock's own hiring material; the repo is public.
 docs/
+# Raw briefs are working input; the spec packet (spec/plan/tasks) is the artefact.
+specs/*/inputs/
 
 # --- secrets ---------------------------------------------------------------
 .env
