@@ -1,7 +1,6 @@
 //! Integration test for `src/server.rs`'s gRPC surface — real server, real
-//! client, real TCP/HTTP2 connection, no mocking (per
-//! `.claude/rules/testing.md` and the standing convention recorded in
-//! `specs/002-binance-feed/revisions.md` entry 3).
+//! client, real TCP/HTTP2 connection, no mocking, per the standing
+//! convention recorded in `specs/002-binance-feed/revisions.md` entry 3.
 
 use keyrock_case_study::orderbook::Empty;
 use keyrock_case_study::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;

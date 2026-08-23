@@ -10,10 +10,9 @@
 ## How to Work This List
 
 Work phase by phase, in order, matching `plan.md`'s six phase boundaries —
-six commits, one per phase (this spec packet's own commit, per
-`.claude/rules/spec-packet.md` and the standing lesson from
-`specs/003-step-1-fixes/`, is the *first* commit on this branch, already
-landed before this file existed). Before committing a phase, all of its
+six commits, one per phase (this spec packet's own commit, per the standing
+lesson from `specs/003-step-1-fixes/`, is the *first* commit on this
+branch, already landed before this file existed). Before committing a phase, all of its
 verification steps must pass; if one doesn't, fix it inside the phase before
 moving on — don't defer it to a later phase's cleanup.
 

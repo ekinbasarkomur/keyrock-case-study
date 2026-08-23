@@ -30,3 +30,30 @@ project owner's own machine, network, cloud accounts, or other projects
 goes into a file that gets committed. If a detail only makes sense to the
 author, it doesn't belong in a repository they've invited someone else to
 read.
+
+## 2. A committed file never cites a file that isn't committed
+
+**What changed:** `tests/grpc.rs`'s module doc comment cited a rules file
+under this project's local, gitignored agent guidance directory (a reader
+of the pushed repository can't open it) alongside
+`specs/002-binance-feed/revisions.md` (committed, fine — kept). The same
+pattern existed in `specs/004-grpc-server/tasks.md` and in
+`specs/002-binance-feed/revisions.md`'s own entry 3. All four unreachable
+citations were dropped or rewritten to describe the fact without pointing
+at a path the reader can't follow; the reachable citations stayed.
+
+**Why:** this exact failure mode already happened once, in step 0 — a
+citation correct and helpful to an agent working inside this repo (which
+does have the local guidance directory on disk) but a dead end for anyone
+reading the pushed repository on GitHub, where that directory was never
+uploaded. It recurred here across three more files, which means the rule
+needs to be explicit and standing, not something caught ad hoc per spec.
+
+**Standing rule, binding from this entry forward:** before a spec packet,
+README section, or code comment cites another file as its source of
+detail, confirm that file is actually committed (not `.gitignore`d) — if it
+isn't, either drop the citation or state the fact directly instead of
+pointing at a path the reader can't open. Paired with entry 1 above, both
+exist for the same underlying reason: a public repository should be
+legible and actionable to a stranger reading it cold, with nothing that
+only resolves for the person who wrote it.

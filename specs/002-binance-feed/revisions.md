@@ -104,16 +104,15 @@ environment-specific and belongs in each runner's own untracked `.env`).
 
 ## 3. Testing convention (applies from this step forward, not a one-off)
 
-**Extends:** `.claude/rules/testing.md`'s existing project-wide rules
+**Extends:** the project's existing testing principles
 (narrowest-meaningful-verification-first, real-path over mock) with concrete
 filing/naming/fixture rules this project didn't have written down yet. Not a
 correction of anything prior — step 0 and step 1 so far didn't conflict with
 it — but it's now the standing rule for step 1 onward, so later specs inherit
 it instead of re-deciding it per step. A condensed pointer to this entry is
-also added to `.claude/rules/testing.md` itself, since that file is always
-loaded for every spec by `CLAUDE.md`'s own file-reading order and this entry
-is not — the convention needs to actually reach later specs, not just be on
-record for this one.
+also mirrored into this project's local (gitignored) agent guidance, so it
+reaches later specs automatically rather than needing to be rediscovered
+here each time.
 
 **Filing — decided by access, not preference:**
 
