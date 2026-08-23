@@ -47,10 +47,9 @@ cargo run -- --pair btcusd --port 12345
 docker compose up --build               # same thing, containerised
 ```
 
-Runs four tasks under one `select!`: the Binance and Bitstamp feeds (one
-generic `feed::run_feed<E>` loop drives both), the aggregator, and the gRPC
-server. Exits the moment any one task ends. Logs go to stderr; stdout stays
-empty.
+Runs four tasks under one `select!`: both feeds (one generic
+`feed::run_feed<E>` loop drives both), the aggregator, and the gRPC server.
+Exits the moment any one task ends. Logs go to stderr; stdout stays empty.
 
 ## gRPC server
 
@@ -98,19 +97,26 @@ production should ship without a toggle.
 ## Layout
 
 ```
-proto/orderbook.proto     the gRPC schema, copied verbatim from the brief
-build.rs                  compiles the proto via tonic-prost-build
-src/config.rs             configuration, read from the environment
-src/telemetry.rs          tracing setup (logs to stderr)
-src/model.rs              Price/Amount newtypes and Book
-src/proxy.rs              HTTP_PROXY/HTTPS_PROXY CONNECT tunnel
-src/exchange/{mod,binance,bitstamp}.rs   the Exchange trait, Venue, two impls
-src/feed.rs               the one generic run_feed<E: Exchange> driver loop
-src/merge.rs              pure two-venue merge: Side, merge_side, merge
-src/aggregator.rs         owns per-venue state, drives merge, publishes watch
-src/server.rs             the OrderbookAggregator gRPC service
-src/main.rs               CLI entry point, spawns the four tasks
-tests/{cli,grpc}.rs       integration tests: real binary, real tonic client
+.
+├── proto/orderbook.proto   gRPC schema, from the brief
+├── build.rs                compiles the proto
+├── src/
+│   ├── config.rs           env-based configuration
+│   ├── telemetry.rs        tracing (logs to stderr)
+│   ├── model.rs            Price/Amount, Book
+│   ├── proxy.rs            HTTP(S)_PROXY CONNECT tunnel
+│   ├── exchange/
+│   │   ├── mod.rs          Exchange trait, Venue
+│   │   ├── binance.rs      Binance impl
+│   │   └── bitstamp.rs     Bitstamp impl
+│   ├── feed.rs             generic run_feed<E> driver
+│   ├── merge.rs            pure merge: Side, merge_side, merge
+│   ├── aggregator.rs       per-venue state, publishes watch
+│   ├── server.rs           OrderbookAggregator gRPC service
+│   └── main.rs             CLI entry, spawns the tasks
+└── tests/
+    ├── cli.rs              real binary
+    └── grpc.rs             real tonic client
 ```
 
 Each file's own doc comment carries the detail this tree doesn't. The
