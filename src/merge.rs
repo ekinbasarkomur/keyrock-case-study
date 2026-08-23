@@ -1,46 +1,126 @@
-//! Pure summarisation of a single venue's book into a publishable `Summary`.
+//! The real, two-book merge: combines every venue's book in the map into one
+//! publishable `Summary`.
 //!
 //! No clock, no I/O, no channel reference — deliberately pure, per
 //! `specs/005-aggregator/spec.md` decision 6, so it can be unit tested
-//! against hand-built `Book` fixtures without faking a websocket. Named and
-//! shaped for a future two-book signature (step 5's real `merge()`), not a
-//! rename later.
+//! against hand-built `Book` fixtures without faking a websocket. Three
+//! layers, each separately testable: `merge()` handles the edge cases and
+//! the spread; `merge_side()` walks all venues' cursors for one side;
+//! `Side::better()`/`Side::levels()` hold the one rule that differs between
+//! bids and asks.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use crate::exchange::Venue;
-use crate::model::Book;
+use crate::model::{Amount, Book, Price};
 use crate::orderbook::{Level, Summary};
 
-/// Takes the first 10 bids and first 10 asks from the map's first
-/// (lowest-ordered) venue's book (Binance already hands over a sorted
-/// `depth20` snapshot, so this is truncation, not sorting — the real
-/// sort/merge work is step 5's), and computes the spread. Returns `None` if
-/// the map is empty.
-pub fn summarise(venues: &BTreeMap<Venue, &Book>) -> Option<Summary> {
-    let (&venue, &book) = venues.iter().next()?;
+const TOP_N: usize = 10;
 
-    // A one-sided book has no publishable spread, so nothing gets
-    // published — same reasoning as filtering `None` out of the watch
-    // stream in step 2: a fabricated value (e.g. spread 0.0, which is
-    // itself a specific claim that the best bid and best ask are at the
-    // same price) is worse than an absent one, because a client can't tell
-    // it apart from a real reading. Real Binance `depth20` data always
-    // returns 20/20, so this branch is never expected to trigger; a
-    // genuinely empty single-venue book is otherwise step 5's "one venue's
-    // book empty" territory.
-    let (best_bid, _) = book.bids.first()?;
-    let (best_ask, _) = book.asks.first()?;
-    let spread = f64::from(*best_ask) - f64::from(*best_bid);
+/// Which side of the book is being merged. An enum, not a `bool` — a bool
+/// parameter is silently invertible with no compile error and would produce
+/// plausible-looking wrong numbers, the same silent-failure category this
+/// project has designed against since step 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Bid,
+    Ask,
+}
 
-    let to_level = |(price, amount): &(crate::model::Price, crate::model::Amount)| Level {
-        exchange: venue.to_string(),
-        price: f64::from(*price),
-        amount: f64::from(*amount),
-    };
+impl Side {
+    /// Returns `Less` when `a` should come before `b` in this side's
+    /// ordering. Price direction depends on the side (asks ascending, bids
+    /// descending); the amount tie-break (larger first) is identical on
+    /// both sides — only the price rule inverts.
+    fn better(self, a: &(Price, Amount), b: &(Price, Amount)) -> Ordering {
+        let (a_price, a_amount) = a;
+        let (b_price, b_amount) = b;
+        let by_price = match self {
+            Side::Ask => a_price.cmp(b_price),
+            Side::Bid => b_price.cmp(a_price),
+        };
+        by_price.then(b_amount.cmp(a_amount))
+    }
 
-    let bids: Vec<Level> = book.bids.iter().take(10).map(to_level).collect();
-    let asks: Vec<Level> = book.asks.iter().take(10).map(to_level).collect();
+    /// Which of `book`'s two sorted lists this side reads.
+    fn levels(self, book: &Book) -> &[(Price, Amount)] {
+        match self {
+            Side::Bid => &book.bids,
+            Side::Ask => &book.asks,
+        }
+    }
+}
+
+/// Merges one side (bids or asks) across every venue in `venues` into the
+/// top `TOP_N` levels, best first.
+///
+/// One `Peekable` cursor per venue, each already sorted (every venue hands
+/// over an already-sorted book) — repeatedly takes whichever cursor's front
+/// element is currently best, per `Side::better`, and advances only that
+/// cursor. `filter_map` drops exhausted cursors with no bounds checks; the
+/// `while out.len() < TOP_N` bound makes the cost independent of book depth.
+/// A min-heap would beat this past four or five venues; at two, it's more
+/// machinery than the problem has.
+fn merge_side(venues: &BTreeMap<Venue, &Book>, side: Side) -> Vec<Level> {
+    // `venues.iter()` walks the `BTreeMap` in `Venue`'s `Ord` order, so
+    // `cursors` is built in that same order. `min_by` returns the *first* of
+    // equal elements it sees, so a full price+amount tie between two venues
+    // resolves deterministically to whichever venue sorts first under
+    // `Venue`'s `Ord` (Binance) — not to run-to-run iteration order. This is
+    // the entire reason step 4 chose `BTreeMap` over `HashMap`; a `HashMap`
+    // here would make that tie flaky. Do not "simplify" this to `HashMap`.
+    let mut cursors: Vec<_> = venues
+        .iter()
+        .map(|(venue, book)| (*venue, side.levels(book).iter().peekable()))
+        .collect();
+
+    let mut out = Vec::with_capacity(TOP_N);
+    while out.len() < TOP_N {
+        let best = cursors
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, (venue, cursor))| cursor.peek().map(|level| (i, *venue, **level)))
+            .min_by(|(_, _, a), (_, _, b)| side.better(a, b));
+
+        match best {
+            None => break,
+            Some((i, venue, (price, amount))) => {
+                out.push(Level {
+                    exchange: venue.to_string(),
+                    price: price.into(),
+                    amount: amount.into(),
+                });
+                cursors[i].1.next();
+            }
+        }
+    }
+    out
+}
+
+/// Merges every venue's book in `venues` into one `Summary`: the top 10 bids
+/// (highest first), the top 10 asks (lowest first), and the spread between
+/// them. Returns `None` if there's nothing publishable — no venues, or the
+/// merged book is one-sided — rather than a fabricated `0.0` spread, which
+/// would itself be a specific (and false) claim that the best bid and best
+/// ask sit at the same price.
+///
+/// No venues, a one-sided merged book, and a single live venue are all
+/// handled by the `?` on `.first()` below, with no explicit branch for any
+/// of them.
+pub fn merge(venues: &BTreeMap<Venue, &Book>) -> Option<Summary> {
+    let bids = merge_side(venues, Side::Bid);
+    let asks = merge_side(venues, Side::Ask);
+
+    let (best_bid, best_ask) = (bids.first()?, asks.first()?);
+
+    // A crossed book (best ask below best bid, so `spread < 0.0`) is
+    // published as-is, not clamped or `abs()`-ed. Within one exchange this
+    // can't happen — its own matching engine would have already crossed the
+    // trade — but across two independently-matched venues it's routine, and
+    // represents a real (if fleeting) arbitrage opportunity worth reporting
+    // honestly rather than hiding.
+    let spread = best_ask.price - best_bid.price;
 
     Some(Summary { spread, bids, asks })
 }
@@ -48,7 +128,6 @@ pub fn summarise(venues: &BTreeMap<Venue, &Book>) -> Option<Summary> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Amount, Price};
 
     /// Builds a `Book` from parallel lists of `(price_str, amount_str)`
     /// pairs, in the order given — mirrors how a real parsed book already
@@ -68,84 +147,123 @@ mod tests {
         }
     }
 
-    /// A 20-level book (10 bids, 10 asks would already be within budget, so
-    /// use 20 on each side to actually exercise truncation) yields 10 bids,
-    /// 10 asks, and the spread computed from the best bid/ask. Catches an
-    /// off-by-one or missing truncation in the top-10 selection.
+    fn level(price: &str, amount: &str) -> (Price, Amount) {
+        (
+            Price::parse(price).expect("valid decimal string"),
+            Amount::parse(amount).expect("valid decimal string"),
+        )
+    }
+
+    /// `Side::Ask` prefers the lower price, `Side::Bid` prefers the higher —
+    /// catches an inverted comparison in `Side::better`.
     #[test]
-    fn summarise_on_a_twenty_level_book_returns_ten_bids_ten_asks_and_correct_spread() {
-        let bids: Vec<(&str, &str)> = (0..20)
-            .map(|i| match i {
-                0 => ("0.0314", "1.0"),
-                _ => ("0.0300", "1.0"),
-            })
-            .collect();
-        let asks: Vec<(&str, &str)> = (0..20)
-            .map(|i| match i {
-                0 => ("0.0316", "1.0"),
-                _ => ("0.0330", "1.0"),
-            })
-            .collect();
-        let book = book_from(&bids, &asks);
+    fn ask_prefers_lower_price_bid_prefers_higher() {
+        let cheap = level("0.0314", "1.0");
+        let expensive = level("0.0316", "1.0");
 
-        let summary = summarise(&BTreeMap::from([(Venue::Binance, &book)]))
-            .expect("Some(book) yields Some(summary)");
+        assert_eq!(Side::Ask.better(&cheap, &expensive), Ordering::Less);
+        assert_eq!(Side::Bid.better(&expensive, &cheap), Ordering::Less);
+    }
 
-        assert_eq!(summary.bids.len(), 10);
-        assert_eq!(summary.asks.len(), 10);
+    /// Equal prices prefer the larger amount, on both sides — catches
+    /// someone inverting the amount rule along with the price rule in the
+    /// `Bid` arm.
+    #[test]
+    fn equal_price_prefers_larger_amount_on_both_sides() {
+        let small = level("0.0314", "1.0");
+        let large = level("0.0314", "2.0");
+
+        assert_eq!(Side::Ask.better(&large, &small), Ordering::Less);
+        assert_eq!(Side::Bid.better(&large, &small), Ordering::Less);
+    }
+
+    /// Two hand-built books across both venues produce the right top-10 on
+    /// each side and the right spread.
+    #[test]
+    fn two_books_merge_into_correct_top_ten_and_spread() {
+        let binance = book_from(
+            &[("0.0314", "1.0"), ("0.0312", "1.0")],
+            &[("0.0316", "1.0"), ("0.0318", "1.0")],
+        );
+        let bitstamp = book_from(
+            &[("0.0315", "1.0"), ("0.0313", "1.0")],
+            &[("0.0317", "1.0"), ("0.0319", "1.0")],
+        );
+        let venues = BTreeMap::from([(Venue::Binance, &binance), (Venue::Bitstamp, &bitstamp)]);
+
+        let summary = merge(&venues).expect("two live venues yield Some(summary)");
+
+        let bid_prices: Vec<f64> = summary.bids.iter().map(|l| l.price).collect();
+        let ask_prices: Vec<f64> = summary.asks.iter().map(|l| l.price).collect();
+        assert_eq!(bid_prices, vec![0.0315, 0.0314, 0.0313, 0.0312]);
+        assert_eq!(ask_prices, vec![0.0316, 0.0317, 0.0318, 0.0319]);
+        assert!((summary.spread - (0.0316 - 0.0315)).abs() < 1e-12);
+    }
+
+    /// Equal price and equal amount across venues resolves deterministically
+    /// to Binance (the venue that sorts first under `Venue`'s `Ord`) —
+    /// catches a regression back to `HashMap`, whose iteration order isn't
+    /// fixed run to run.
+    #[test]
+    fn equal_price_and_amount_across_venues_resolves_deterministically() {
+        let binance = book_from(&[("0.0314", "1.0")], &[("0.0316", "1.0")]);
+        let bitstamp = book_from(&[("0.0314", "1.0")], &[("0.0316", "1.0")]);
+        let venues = BTreeMap::from([(Venue::Binance, &binance), (Venue::Bitstamp, &bitstamp)]);
+
+        let summary = merge(&venues).expect("two live venues yield Some(summary)");
+
+        assert_eq!(summary.bids[0].exchange, "binance");
+        assert_eq!(summary.asks[0].exchange, "binance");
+    }
+
+    /// A crossed book (one venue's best ask sits below the other venue's
+    /// best bid) produces a negative spread and doesn't panic — catches an
+    /// `abs()` or a clamp added by someone who mistakes this for a bug.
+    #[test]
+    fn crossed_book_produces_negative_spread_without_panicking() {
+        let binance = book_from(&[("0.0320", "1.0")], &[("0.0330", "1.0")]);
+        let bitstamp = book_from(&[("0.0310", "1.0")], &[("0.0315", "1.0")]);
+        let venues = BTreeMap::from([(Venue::Binance, &binance), (Venue::Bitstamp, &bitstamp)]);
+
+        let summary = merge(&venues).expect("two live venues yield Some(summary)");
+
+        assert!(summary.spread < 0.0);
+    }
+
+    /// Only one venue present in the map still merges correctly — catches
+    /// N=1 being treated as a special case that produces wrong or panicking
+    /// output.
+    #[test]
+    fn single_venue_still_merges() {
+        let binance = book_from(&[("0.0314", "1.0")], &[("0.0316", "1.0")]);
+        let venues = BTreeMap::from([(Venue::Binance, &binance)]);
+
+        let summary = merge(&venues).expect("one live venue yields Some(summary)");
+
+        assert_eq!(summary.bids.len(), 1);
+        assert_eq!(summary.asks.len(), 1);
         assert!((summary.spread - (0.0316 - 0.0314)).abs() < 1e-12);
     }
 
-    /// Bids come back in the order given (descending by price, since that's
-    /// how a real book already arrives), asks ascending — currently just
-    /// truncation, but this locks the contract in before step 5's real
-    /// `merge()` does actual ordering work.
+    /// An empty map returns `None` — catches a fabricated empty `Summary`
+    /// being returned instead of `None`.
     #[test]
-    fn summarise_returns_bids_descending_by_price_and_asks_ascending() {
-        let book = book_from(
-            &[("0.0314", "1.0"), ("0.0313", "1.0"), ("0.0312", "1.0")],
-            &[("0.0316", "1.0"), ("0.0317", "1.0"), ("0.0318", "1.0")],
-        );
-
-        let summary = summarise(&BTreeMap::from([(Venue::Binance, &book)]))
-            .expect("Some(book) yields Some(summary)");
-
-        let bid_prices: Vec<f64> = summary.bids.iter().map(|level| level.price).collect();
-        let ask_prices: Vec<f64> = summary.asks.iter().map(|level| level.price).collect();
-        assert!(bid_prices.windows(2).all(|pair| pair[0] > pair[1]));
-        assert!(ask_prices.windows(2).all(|pair| pair[0] < pair[1]));
+    fn no_venues_returns_none() {
+        assert_eq!(merge(&BTreeMap::new()), None);
     }
 
-    /// A 6-level book returns 6 levels per side, not padded to 10. Catches
-    /// accidental zero-padding of a short book.
+    /// A book with fewer than 10 levels on a side returns what exists, not
+    /// padded to 10 — catches invented price levels.
     #[test]
-    fn summarise_on_a_six_level_book_returns_six_levels_per_side_not_padded_to_ten() {
+    fn six_levels_returns_six_not_padded_to_ten() {
         let bids: Vec<(&str, &str)> = (0..6).map(|_| ("0.0314", "1.0")).collect();
         let asks: Vec<(&str, &str)> = (0..6).map(|_| ("0.0316", "1.0")).collect();
-        let book = book_from(&bids, &asks);
+        let binance = book_from(&bids, &asks);
+        let venues = BTreeMap::from([(Venue::Binance, &binance)]);
 
-        let summary = summarise(&BTreeMap::from([(Venue::Binance, &book)]))
-            .expect("Some(book) yields Some(summary)");
+        let summary = merge(&venues).expect("Some(book) yields Some(summary)");
 
         assert_eq!(summary.bids.len(), 6);
         assert_eq!(summary.asks.len(), 6);
-    }
-
-    /// `summarise(&BTreeMap::new())` returns `None` — catches a panic or
-    /// a synthesized-empty-summary bug on the "no data yet" path.
-    #[test]
-    fn summarise_with_no_book_returns_none() {
-        assert_eq!(summarise(&BTreeMap::new()), None);
-    }
-
-    /// A one-sided book (one side has no levels) returns `None`, not a
-    /// fabricated `0.0` spread — catches a regression back to publishing a
-    /// specific-but-false market-state claim (spread `0.0` asserts the best
-    /// bid and best ask are at the same price) instead of honestly
-    /// reporting "nothing to publish."
-    #[test]
-    fn summarise_on_a_one_sided_book_returns_none() {
-        let book = book_from(&[("0.0314", "1.0")], &[]);
-        assert_eq!(summarise(&BTreeMap::from([(Venue::Binance, &book)])), None);
     }
 }
