@@ -8,6 +8,7 @@
 //! that file and from nowhere else — so it silently stops being covered the
 //! moment the test suite grows past one file.
 
+pub mod aggregator;
 pub mod config;
 pub mod exchange;
 pub mod merge;
