@@ -45,17 +45,29 @@ cargo fmt --check
 ## Layout
 
 ```
-proto/orderbook.proto  the gRPC schema — copied verbatim from the brief,
-                        never hand-edited
-build.rs                compiles proto/orderbook.proto to Rust via
-                        tonic-prost-build
-src/lib.rs              library root; also pulls in the generated proto
-                        types via tonic::include_proto! so the build
-                        pipeline is proven, not just assumed
-src/config.rs           configuration, read from the environment
-src/telemetry.rs        tracing setup (logs to stderr)
-src/main.rs             CLI entry point — parses arguments and delegates
-tests/cli.rs            integration tests: the real binary, as a subprocess
+.
+├── proto/
+│   └── orderbook.proto   the gRPC schema — copied verbatim from the brief,
+│                         never hand-edited
+├── build.rs              compiles proto/orderbook.proto to Rust via
+│                         tonic-prost-build
+├── src/
+│   ├── lib.rs            library root; also pulls in the generated proto
+│   │                     types via tonic::include_proto! so the build
+│   │                     pipeline is proven, not just assumed
+│   ├── config.rs         configuration, read from the environment
+│   ├── telemetry.rs      tracing setup (logs to stderr)
+│   ├── model.rs          Price/Amount newtypes and Book — exchange-agnostic
+│   ├── proxy.rs          parses HTTP_PROXY/HTTPS_PROXY for the optional
+│   │                     CONNECT tunnel
+│   ├── exchange/
+│   │   ├── mod.rs        declares the binance submodule — no trait yet,
+│   │   │                 see specs/002-binance-feed/spec.md
+│   │   └── binance.rs    connect URL, read loop, parse() -> Option<Book>
+│   └── main.rs           CLI entry point — parses arguments, connects,
+│                         drives the read loop
+└── tests/
+    └── cli.rs            integration tests: the real binary, as a subprocess
 ```
 
 The library/binary split is intentional: integration tests under `tests/`
