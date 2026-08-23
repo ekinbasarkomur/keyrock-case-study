@@ -58,6 +58,7 @@ RUN useradd --create-home --uid 10001 app
 
 WORKDIR /app
 COPY --from=builder /build/target/release/keyrock-case-study /usr/local/bin/keyrock-case-study
+COPY --from=builder /build/target/release/client /usr/local/bin/client
 
 USER app
 

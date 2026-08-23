@@ -48,3 +48,24 @@ services:
     # from (directly or via the PROXY_HOST/PROXY_PORT pass-through above),
     # the container exits shortly after starting — the three-task select!
     # in main.rs ends the whole process the instant the feed task ends.
+
+  # Demonstration client, not part of the service. Shares the image `app`
+  # builds (`image:`, not `build:`) rather than rebuilding it, and overrides
+  # only this service's entrypoint/command — `app`'s own ENTRYPOINT stays
+  # ["keyrock-case-study"] so `docker compose run --rm app --pair btcusd`
+  # keeps passing args straight through to the server binary.
+  client:
+    image: keyrock-case-study:local
+    entrypoint: ["client"]
+    command: ["--addr", "http://app:50051"]
+    depends_on: [app]
+    # Renders ANSI escape codes (cursor-home, colour) — needs a tty to
+    # render correctly rather than print raw escape sequences.
+    tty: true
+
+    # Expected, not a defect: if `app` exits (no route to Binance, no proxy
+    # configured — see the comment on `app` above), this service stays up,
+    # retrying its connection every second. That's the fixed reconnect loop
+    # in src/bin/client.rs working as designed, not a bug — but it means the
+    # logs will read as if the client is the noisy one while `app` is
+    # actually the side that died.
