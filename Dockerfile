@@ -61,11 +61,14 @@ COPY --from=builder /build/target/release/keyrock-case-study /usr/local/bin/keyr
 
 USER app
 
-# No HEALTHCHECK yet, deliberately: there is no long-running server to probe.
+# No HEALTHCHECK yet. The gRPC server (landed in 004-grpc-server) is
+# long-running now, but nothing here exposes an HTTP endpoint to probe — the
+# example below is HTTP-shaped and wrong for this service; a real one would
+# need a gRPC health probe (e.g. the `grpc.health.v1.Health` service via
+# `tonic-health`, not currently a dependency) or `grpcurl` in the image.
 # A healthcheck pointed at a port nothing listens on marks the container
-# permanently unhealthy, which trains everyone to ignore the status column.
-# When a server lands here, add one then — and give it a --start-period long
-# enough to cover startup:
+# permanently unhealthy, which trains everyone to ignore the status column,
+# so it stays out until there's a real probe to run:
 #
 #   HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 #       CMD curl -fsS http://127.0.0.1:8080/health || exit 1
