@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod exchange;
+pub mod merge;
 pub mod model;
 pub mod proxy;
 pub mod server;
