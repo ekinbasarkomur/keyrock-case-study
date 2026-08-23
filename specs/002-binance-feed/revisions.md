@@ -233,3 +233,34 @@ the 25+ minute manual run and, for restricted networks, by the proxy path
 in entry 2). That boundary is deliberate, not a gap: CLI/config-precedence
 correctness and live-feed correctness are different claims, and this test
 file only ever made the first one.
+
+## 5. The 25-minute ping/pong survival run — actually verified, 2026-08-23
+
+Spec.md's Acceptance Criteria and Risks sections both flagged the
+ping/pong-survival claim as unverified until an empirical run happened
+("acceptable for this step... a real bug found on day one rather than at
+hour forty" if it failed). It has now been run for real, through the
+project owner's own proxy (see entry 2) after they opened port 9443 on
+their Squid proxy's `SSL_ports` ACL (`CONNECT` to non-443 ports is denied
+by default; 9443 isn't in Squid's default allowlist).
+
+**Result: passed, with hard evidence, not just "it didn't crash."**
+
+- Connection held for **1623 seconds (27m 3s)** continuously, from
+  `10:45:34Z` to `11:13:21Z` — comfortably past the required 25 minutes and
+  past multiple full cycles of Binance's 60-second pong-timeout window.
+- **84 `PING` frames received, 84 `PONG` frames sent** — a 1:1 match,
+  confirmed via `tungstenite=trace`-level logging of the actual frame
+  bytes, not inferred from the absence of a disconnect. This directly
+  answers the risk this spec named: `tokio-tungstenite` only flushes a
+  queued pong when the write half makes progress, and the read loop itself
+  never writes anything — the concern was real, and the automatic
+  pong-queueing mechanism handled it correctly across all 84 cycles.
+- **3,079 book-update log lines**, continuous across the full run, zero
+  gaps.
+- **Zero errors, zero panics** anywhere in the trace log.
+
+This closes the last open item from entry 4's "what this doesn't cover"
+note and from spec.md's own Acceptance Criteria — live-feed correctness (as
+opposed to CLI/config-precedence correctness) is now verified, not
+outstanding.

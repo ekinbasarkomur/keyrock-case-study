@@ -18,7 +18,7 @@ reshaping it.
 | --- | --- | --- |
 | 0 | Scaffold: dependencies, proto, `build.rs`, CLI, config, Docker | Done |
 | 1 | Binance feed: connect, parse, print | Done |
-| 2 | gRPC server streaming a static/fake `Summary` | Not started |
+| 2 | gRPC server streaming a static/fake `Summary` | In progress |
 | 3 | Wire step 1 into step 2 — first real end-to-end milestone | Not started |
 | 4 | Add the Bitstamp feed | Not started |
 | 5 | Real `merge()` + top-10 + spread — the core deliverable | Not started |
