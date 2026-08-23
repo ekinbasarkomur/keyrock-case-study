@@ -123,6 +123,12 @@ directly. Unset, behavior is unchanged. `compose.yml` builds this from
 value falls back to a direct connection with a warning rather than failing
 to start.
 
+**Verified live** (2026-08-23, via the proxy path above): the connection
+held for 27 minutes straight against Binance's 20s ping / 60s pong-timeout —
+84 pings received, 84 pongs sent automatically by `tokio-tungstenite`, 3,079
+book updates logged, zero errors. Full evidence in
+`specs/002-binance-feed/revisions.md` entry 5.
+
 ## Price representation
 
 `Price`/`Amount` are thin newtypes over `f64` — chosen for type safety (the
