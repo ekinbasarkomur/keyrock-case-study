@@ -66,8 +66,8 @@ fn parse_levels(levels: &[[String; 2]]) -> Option<Vec<(Price, crate::model::Amou
     levels
         .iter()
         .map(|[price, amount]| {
-            let price = Price::from_str_price(price)?;
-            let amount = crate::model::Amount::from_str_price(amount)?;
+            let price = Price::parse(price)?;
+            let amount = crate::model::Amount::parse(amount)?;
             Some((price, amount))
         })
         .collect()
@@ -77,11 +77,18 @@ fn parse_levels(levels: &[[String; 2]]) -> Option<Vec<(Price, crate::model::Amou
 mod tests {
     use super::*;
 
-    /// A real-shaped Binance `depth20` payload (constructed to match the
-    /// documented wire shape at
-    /// <https://www.binance.com/en/binance-api> depth-stream sample, since a
-    /// live capture wasn't practical for this fixture) with 20 bid levels
-    /// and 20 ask levels.
+    /// Synthetic `depth20` payload — NOT a real capture. The bids step down
+    /// in exact `0.00001` increments with amounts in exact `0.25`
+    /// increments, which no real order book looks like; this fixture only
+    /// exercises the JSON shape, not real Binance data.
+    ///
+    /// TODO(project owner): replace with a real captured
+    /// `wss://stream.binance.com:9443/ws/ethbtc@depth20@100ms` payload —
+    /// this sandbox has no live network access to capture one (verified:
+    /// `curl` to `stream.binance.com:9443` times out). Capture with
+    /// `wscat -c wss://stream.binance.com:9443/ws/ethbtc@depth20@100ms`
+    /// (or equivalent) from a network that can reach Binance, then update
+    /// this comment to record where/when it was captured.
     const DEPTH20_FIXTURE: &str = r#"{"lastUpdateId": 7723441, "bids": [["0.03150000", "1.00000000"], ["0.03149000", "1.25000000"], ["0.03148000", "1.50000000"], ["0.03147000", "1.75000000"], ["0.03146000", "2.00000000"], ["0.03145000", "2.25000000"], ["0.03144000", "2.50000000"], ["0.03143000", "2.75000000"], ["0.03142000", "3.00000000"], ["0.03141000", "3.25000000"], ["0.03140000", "3.50000000"], ["0.03139000", "3.75000000"], ["0.03138000", "4.00000000"], ["0.03137000", "4.25000000"], ["0.03136000", "4.50000000"], ["0.03135000", "4.75000000"], ["0.03134000", "5.00000000"], ["0.03133000", "5.25000000"], ["0.03132000", "5.50000000"], ["0.03131000", "5.75000000"]], "asks": [["0.03151000", "2.00000000"], ["0.03152000", "2.50000000"], ["0.03153000", "3.00000000"], ["0.03154000", "3.50000000"], ["0.03155000", "4.00000000"], ["0.03156000", "4.50000000"], ["0.03157000", "5.00000000"], ["0.03158000", "5.50000000"], ["0.03159000", "6.00000000"], ["0.03160000", "6.50000000"], ["0.03161000", "7.00000000"], ["0.03162000", "7.50000000"], ["0.03163000", "8.00000000"], ["0.03164000", "8.50000000"], ["0.03165000", "9.00000000"], ["0.03166000", "9.50000000"], ["0.03167000", "10.00000000"], ["0.03168000", "10.50000000"], ["0.03169000", "11.00000000"], ["0.03170000", "11.50000000"]]}"#;
 
     #[test]
@@ -93,31 +100,31 @@ mod tests {
         assert_eq!(book.last_update_id, 7_723_441);
 
         let (best_bid_price, best_bid_amount) = book.bids[0];
-        assert_eq!(best_bid_price, Price::from_str_price("0.03150000").unwrap());
+        assert_eq!(best_bid_price, Price::parse("0.03150000").unwrap());
         assert_eq!(
             best_bid_amount,
-            crate::model::Amount::from_str_price("1.00000000").unwrap()
+            crate::model::Amount::parse("1.00000000").unwrap()
         );
 
         let (best_ask_price, best_ask_amount) = book.asks[0];
-        assert_eq!(best_ask_price, Price::from_str_price("0.03151000").unwrap());
+        assert_eq!(best_ask_price, Price::parse("0.03151000").unwrap());
         assert_eq!(
             best_ask_amount,
-            crate::model::Amount::from_str_price("2.00000000").unwrap()
+            crate::model::Amount::parse("2.00000000").unwrap()
         );
 
         let (last_bid_price, last_bid_amount) = book.bids[19];
-        assert_eq!(last_bid_price, Price::from_str_price("0.03131000").unwrap());
+        assert_eq!(last_bid_price, Price::parse("0.03131000").unwrap());
         assert_eq!(
             last_bid_amount,
-            crate::model::Amount::from_str_price("5.75000000").unwrap()
+            crate::model::Amount::parse("5.75000000").unwrap()
         );
 
         let (last_ask_price, last_ask_amount) = book.asks[19];
-        assert_eq!(last_ask_price, Price::from_str_price("0.03170000").unwrap());
+        assert_eq!(last_ask_price, Price::parse("0.03170000").unwrap());
         assert_eq!(
             last_ask_amount,
-            crate::model::Amount::from_str_price("11.50000000").unwrap()
+            crate::model::Amount::parse("11.50000000").unwrap()
         );
     }
 

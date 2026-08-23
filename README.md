@@ -5,11 +5,12 @@ finished service connects to Binance and Bitstamp order-book websocket
 feeds, merges the two books for one traded pair, and streams the spread plus
 the top 10 bids/asks over gRPC (`proto/orderbook.proto`).
 
-**None of that logic exists yet.** This is step 0 of an 11-step build order:
-a containerised skeleton with the dependencies the build is expected to
-need, a real CLI, a real config system, and a proto build pipeline whose
-output is actually compiled — but no websocket client, merge logic, or gRPC
-service yet. Later steps build on this without reshaping it.
+**Step 1 of an 11-step build order has landed.** The binary connects to
+Binance's `depth20@100ms` websocket stream, parses each snapshot into the
+internal `Book` type, and logs the top of book to stderr on every update.
+There is still no second venue (Bitstamp), no merge logic, and no gRPC
+server — those are later steps. Later steps build on this without
+reshaping it.
 
 ## Requirements
 
@@ -30,9 +31,11 @@ cargo run -- --pair btcusd --port 12345
 docker compose up --build               # same thing, containerised
 ```
 
-Both parse arguments, build a `Config`, log one `starting` line to stderr,
-and exit 0. There's no server yet, so nothing listens on the port and
-stdout stays empty.
+Both parse arguments, build a `Config`, log a `starting` line to stderr,
+then connect to Binance and stream `depth20` book updates, logging each
+one to stderr, until the connection closes (or forever, if it stays open).
+There's no gRPC server yet, so nothing listens on the port and stdout stays
+empty.
 
 ## Development
 
@@ -58,8 +61,8 @@ cargo fmt --check
 │   ├── config.rs         configuration, read from the environment
 │   ├── telemetry.rs      tracing setup (logs to stderr)
 │   ├── model.rs          Price/Amount newtypes and Book — exchange-agnostic
-│   ├── proxy.rs          parses HTTP_PROXY/HTTPS_PROXY for the optional
-│   │                     CONNECT tunnel
+│   ├── proxy.rs          parses HTTP_PROXY/HTTPS_PROXY and implements the
+│   │                     optional HTTP CONNECT tunnel
 │   ├── exchange/
 │   │   ├── mod.rs        declares the binance submodule — no trait yet,
 │   │   │                 see specs/002-binance-feed/spec.md
@@ -119,7 +122,7 @@ updates — unlike this one — would be right to reach for integers instead.
 ## Docker
 
 ```sh
-docker compose up --build                        # defaults, logs, exits 0
+docker compose up --build                        # defaults, connects to Binance, logs book updates
 docker compose run --rm app --pair btcusd --port 12345
 ```
 
@@ -129,9 +132,11 @@ installs `protobuf-compiler` itself — no host setup required. The runtime
 stage skips `ca-certificates`: `tokio-tungstenite`'s
 `rustls-tls-webpki-roots` feature bundles its own root certs.
 
-No long-running service yet, so `docker compose up --build` logs the
-startup line and exits 0 rather than staying up. A later step adds a
-`command:`, a `ports:` publish on loopback, and a `HEALTHCHECK`.
+No gRPC server yet, so `docker compose up --build` connects to Binance and
+streams book-update logs rather than serving anything on the port — it
+runs until the websocket connection closes (or forever, if it stays open),
+it does not exit 0 promptly. A later step adds a `ports:` publish on
+loopback and a `HEALTHCHECK`.
 
 ## What would change for production
 
