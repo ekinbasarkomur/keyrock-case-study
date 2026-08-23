@@ -17,6 +17,19 @@ use crate::orderbook::{Level, Summary};
 pub fn summarise(venue: Venue, book: Option<&Book>) -> Option<Summary> {
     let book = book?;
 
+    // A one-sided book has no publishable spread, so nothing gets
+    // published — same reasoning as filtering `None` out of the watch
+    // stream in step 2: a fabricated value (e.g. spread 0.0, which is
+    // itself a specific claim that the best bid and best ask are at the
+    // same price) is worse than an absent one, because a client can't tell
+    // it apart from a real reading. Real Binance `depth20` data always
+    // returns 20/20, so this branch is never expected to trigger; a
+    // genuinely empty single-venue book is otherwise step 5's "one venue's
+    // book empty" territory.
+    let (best_bid, _) = book.bids.first()?;
+    let (best_ask, _) = book.asks.first()?;
+    let spread = f64::from(*best_ask) - f64::from(*best_bid);
+
     let to_level = |(price, amount): &(crate::model::Price, crate::model::Amount)| Level {
         exchange: venue.to_string(),
         price: f64::from(*price),
@@ -25,15 +38,6 @@ pub fn summarise(venue: Venue, book: Option<&Book>) -> Option<Summary> {
 
     let bids: Vec<Level> = book.bids.iter().take(10).map(to_level).collect();
     let asks: Vec<Level> = book.asks.iter().take(10).map(to_level).collect();
-
-    // Defensive fallback, not a market-state claim: real Binance depth20
-    // data always returns 20/20, so this branch is never expected to
-    // trigger. A genuinely empty single-venue book is step 5's "one venue's
-    // book empty" territory — this step only needs to not panic.
-    let spread = match (book.bids.first(), book.asks.first()) {
-        (Some((best_bid, _)), Some((best_ask, _))) => f64::from(*best_ask) - f64::from(*best_bid),
-        _ => 0.0,
-    };
 
     Some(Summary { spread, bids, asks })
 }
@@ -129,5 +133,16 @@ mod tests {
     #[test]
     fn summarise_with_no_book_returns_none() {
         assert_eq!(summarise(Venue::Binance, None), None);
+    }
+
+    /// A one-sided book (one side has no levels) returns `None`, not a
+    /// fabricated `0.0` spread — catches a regression back to publishing a
+    /// specific-but-false market-state claim (spread `0.0` asserts the best
+    /// bid and best ask are at the same price) instead of honestly
+    /// reporting "nothing to publish."
+    #[test]
+    fn summarise_on_a_one_sided_book_returns_none() {
+        let book = book_from(&[("0.0314", "1.0")], &[]);
+        assert_eq!(summarise(Venue::Binance, Some(&book)), None);
     }
 }
