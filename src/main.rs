@@ -6,21 +6,24 @@
 //!
 //! Three tasks run concurrently from here: the Binance feed loop (unchanged
 //! in behavior from step 1, just moved into [`run_feed`] so it can be
-//! spawned), the fake-data writer (`server::run_fake_writer`), and the gRPC
-//! server (`server::router(rx).serve(addr)`). See the `select!` at the
-//! bottom of [`main`] for why all three are supervised together rather than
-//! run sequentially or fire-and-forgotten.
+//! spawned), the aggregator task (`aggregator::run`, step 3 — owns per-venue
+//! book state, calls `merge::summarise`, publishes into the watch channel),
+//! and the gRPC server (`server::router(rx).serve(addr)`). See the
+//! `select!` at the bottom of [`main`] for why all three are supervised
+//! together rather than run sequentially or fire-and-forgotten.
 
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures_util::StreamExt;
+use keyrock_case_study::exchange::Venue;
 use keyrock_case_study::exchange::binance;
+use keyrock_case_study::model::Book;
 use keyrock_case_study::proxy::{self, parse_proxy_addr};
-use keyrock_case_study::server;
+use keyrock_case_study::{aggregator, server};
 use keyrock_case_study::{config::Config, telemetry};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{client_async_tls, connect_async};
 use tracing::{debug, info, warn};
@@ -69,14 +72,20 @@ async fn main() -> Result<()> {
         .parse()
         .with_context(|| format!("invalid bind address {}:{}", config.host, config.port))?;
 
-    // `None` until the fake writer's (and, from step 3 on, the real
-    // aggregator's) first tick — `server::router`'s stream filters that
-    // case out rather than publishing a fabricated empty `Summary`.
+    // `None` until the aggregator's first published summary —
+    // `server::router`'s stream filters that case out rather than
+    // publishing a fabricated empty `Summary`.
     let (tx, rx) = watch::channel(None);
 
+    // Bounded, not unbounded: an unbounded channel would hide backpressure
+    // (a stuck aggregator silently growing memory instead of visibly
+    // slowing the feed) — see `specs/005-aggregator/spec.md` decision 1. 32
+    // gives slack for a brief lag without hiding a genuinely stuck consumer.
+    let (feed_tx, feed_rx) = mpsc::channel::<(Venue, Book)>(32);
+
     let pair = config.pair.clone();
-    let feed_handle = tokio::spawn(async move { run_feed(pair).await });
-    let fake_writer_handle = tokio::spawn(server::run_fake_writer(tx));
+    let feed_handle = tokio::spawn(async move { run_feed(pair, feed_tx).await });
+    let aggregator_handle = tokio::spawn(aggregator::run(feed_rx, tx));
     let server_handle = tokio::spawn(async move { server::router(rx).serve(addr).await });
 
     // `select!` over all three `JoinHandle`s, not sequential `.await`s and
@@ -101,12 +110,12 @@ async fn main() -> Result<()> {
             Ok(Err(e)) => Err(e).context("feed task failed"),
             Err(e) => Err(e).context("feed task panicked"),
         },
-        res = fake_writer_handle => match res {
+        res = aggregator_handle => match res {
             Ok(()) => {
-                info!("fake writer task ended");
+                info!("aggregator task ended");
                 Ok(())
             }
-            Err(e) => Err(e).context("fake writer task panicked"),
+            Err(e) => Err(e).context("aggregator task panicked"),
         },
         res = server_handle => match res {
             Ok(Ok(())) => {
@@ -119,11 +128,12 @@ async fn main() -> Result<()> {
     }
 }
 
-/// The Binance feed loop — connect, read frames, log the top of book.
-/// Structurally identical to what step 1 ran directly in `main`'s own task;
-/// moved into its own function only so it can be `tokio::spawn`ed alongside
-/// the fake writer and the gRPC server.
-async fn run_feed(pair: String) -> Result<()> {
+/// The Binance feed loop — connect, read frames, log the top of book, and
+/// send each parsed [`Book`] down `tx` to the aggregator task. Structurally
+/// identical to what step 1 ran directly in `main`'s own task; moved into
+/// its own function only so it can be `tokio::spawn`ed alongside the
+/// aggregator and the gRPC server.
+async fn run_feed(pair: String, tx: mpsc::Sender<(Venue, Book)>) -> Result<()> {
     let url = binance::connect_url(&pair);
     let (mut ws, _response) = match proxy_addr() {
         Some((proxy_host, proxy_port)) => {
@@ -149,14 +159,22 @@ async fn run_feed(pair: String) -> Result<()> {
         let message = message.context("websocket read failed")?;
         match message {
             Message::Text(text) => {
-                if let Some(book) = binance::parse(&text)
-                    && let (Some((bid_price, bid_amount)), Some((ask_price, ask_amount))) =
+                if let Some(book) = binance::parse(&text) {
+                    if let (Some((bid_price, bid_amount)), Some((ask_price, ask_amount))) =
                         (book.bids.first(), book.asks.first())
-                {
-                    info!(
-                        "binance {} | bid {} x {} | ask {} x {} | id {}",
-                        pair, bid_price, bid_amount, ask_price, ask_amount, book.last_update_id
-                    );
+                    {
+                        info!(
+                            "binance {} | bid {} x {} | ask {} x {} | id {}",
+                            pair, bid_price, bid_amount, ask_price, ask_amount, book.last_update_id
+                        );
+                    }
+                    // A bounded `.send(...).await` naturally backpressures
+                    // the feed if the aggregator falls behind — the point of
+                    // decision 1's bounded channel, not a bug. A failed send
+                    // (aggregator's `Receiver` gone) doesn't kill this loop:
+                    // the aggregator ending already ends the whole process
+                    // via `select!`, so there's nothing extra to do here.
+                    let _ = tx.send((Venue::Binance, book)).await;
                 }
             }
             // `tokio-tungstenite` answers pings automatically; nothing to do

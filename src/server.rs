@@ -4,16 +4,14 @@
 //! port, so both callers share the exact same construction code and differ
 //! only in what address they serve on.
 //!
-//! This phase's watch channel is fed by [`run_fake_writer`] — a
-//! once-a-second placeholder producer. Step 3 of the build order deletes it
-//! and points the same `watch::Sender` at the real aggregator instead; none
-//! of the plumbing in this file changes when that happens.
+//! The watch channel is fed by the real aggregator task (`src/aggregator.rs`,
+//! step 3 of the build order) — step 2's placeholder `run_fake_writer` has
+//! been deleted.
 
 use std::pin::Pin;
-use std::time::Duration;
+use std::sync::Arc;
 
 use tokio::sync::watch;
-use tokio::time::interval;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
@@ -21,7 +19,7 @@ use tonic::{Request, Response, Status};
 use crate::orderbook::orderbook_aggregator_server::{
     OrderbookAggregator, OrderbookAggregatorServer,
 };
-use crate::orderbook::{Empty, Level, Summary};
+use crate::orderbook::{Empty, Summary};
 
 /// Emitted by `build.rs` alongside the generated Rust types — the raw bytes
 /// `tonic-reflection` needs to answer `list`/`describe` calls without a
@@ -32,9 +30,9 @@ const FILE_DESCRIPTOR_SET: &[u8] =
 
 /// The `OrderbookAggregator` implementation. Holds only the receiving half
 /// of the watch channel — it never constructs a `Summary` itself, that's
-/// [`run_fake_writer`]'s (and, from step 3 on, the real aggregator's) job.
+/// the aggregator task's (`src/aggregator.rs`) job.
 struct AggregatorService {
-    rx: watch::Receiver<Option<Summary>>,
+    rx: watch::Receiver<Option<Arc<Summary>>>,
 }
 
 #[tonic::async_trait]
@@ -62,7 +60,14 @@ impl OrderbookAggregator for AggregatorService {
         // watch's current value immediately, since `WatchStream::new`
         // yields the current value on first poll rather than waiting for a
         // change.
-        let stream = WatchStream::new(self.rx.clone()).filter_map(|opt| opt.map(Ok));
+        // `Arc::clone` (cheap, atomic) happens under `WatchStream`'s internal
+        // lock as it reads the current value; the deep `Summary` clone
+        // (`tonic` needs a `Summary` by value, not an `Arc<Summary>`) happens
+        // afterward, on the already-cloned `Arc`, outside that lock — per
+        // spec.md decision 5, so a slow subscriber's deep clone never blocks
+        // another subscriber's read of the current value.
+        let stream =
+            WatchStream::new(self.rx.clone()).filter_map(|opt| opt.map(|arc| Ok((*arc).clone())));
         Ok(Response::new(Box::pin(stream)))
     }
 }
@@ -79,7 +84,7 @@ impl OrderbookAggregator for AggregatorService {
 /// compile time, never runtime input) fails to parse — an invariant that
 /// can only break by editing `build.rs` or the proto itself, not by
 /// anything a caller passes in.
-pub fn router(rx: watch::Receiver<Option<Summary>>) -> tonic::transport::server::Router {
+pub fn router(rx: watch::Receiver<Option<Arc<Summary>>>) -> tonic::transport::server::Router {
     let aggregator = AggregatorService { rx };
 
     let reflection = tonic_reflection::server::Builder::configure()
@@ -90,52 +95,4 @@ pub fn router(rx: watch::Receiver<Option<Summary>>) -> tonic::transport::server:
     tonic::transport::Server::builder()
         .add_service(OrderbookAggregatorServer::new(aggregator))
         .add_service(reflection)
-}
-
-/// Placeholder producer for this step: once a second, builds a `Summary`
-/// with exactly 10 `Level`s per side clustered around the ETHBTC scale
-/// (`0.0315`) and a small positive spread, and sends it into `tx`. Every
-/// `Level.exchange` is the literal `"fake"` — never `"binance"` — so
-/// `grpcurl` output is unmistakably placeholder data, and so a later step
-/// can assert `"fake"` never appears once this task is deleted and the
-/// watch is fed by the real aggregator instead.
-///
-/// Structured as a standalone `async fn` (not spawned here) so `main.rs`
-/// can `tokio::spawn` it directly, alongside the feed and server tasks,
-/// under one `select!`.
-pub async fn run_fake_writer(tx: watch::Sender<Option<Summary>>) {
-    let mut ticker = interval(Duration::from_secs(1));
-    loop {
-        ticker.tick().await;
-
-        let bids: Vec<Level> = (0..10)
-            .map(|i| Level {
-                exchange: "fake".to_string(),
-                price: 0.0315 - (i as f64) * 0.0001,
-                amount: 1.0 + (i as f64) * 0.1,
-            })
-            .collect();
-        let asks: Vec<Level> = (0..10)
-            .map(|i| Level {
-                exchange: "fake".to_string(),
-                price: 0.0316 + (i as f64) * 0.0001,
-                amount: 1.0 + (i as f64) * 0.1,
-            })
-            .collect();
-        // Derived from the vectors, not restated as a literal — changing the
-        // base prices above and forgetting to update a hardcoded spread
-        // would silently produce internally-inconsistent data that nothing
-        // catches (the test only asserts `spread > 0.0`, which would still
-        // hold). `asks[0]`/`bids[0]` are the best ask/bid by construction.
-        let spread = asks[0].price - bids[0].price;
-
-        let summary = Summary { spread, bids, asks };
-
-        // `send` only fails once every receiver (every connected client,
-        // plus main's own held copy) has been dropped — nothing left to
-        // publish to, not a condition worth logging or propagating.
-        if tx.send(Some(summary)).is_err() {
-            break;
-        }
-    }
 }

@@ -14,12 +14,21 @@ pub const PORT: u16 = 9443;
 
 /// Binance's `depth20@100ms` payload shape. Only the fields this step needs
 /// are declared — `serde` ignores anything else Binance sends.
+///
+/// Borrows `bids`/`asks` straight out of the source JSON text instead of
+/// allocating a `String` per price/amount (~107 allocations per message down
+/// to ~27). The borrow must not outlive `parse()`: `Book` (what actually
+/// survives past this function, down the `mpsc`, into the aggregator) holds
+/// only `Price`/`Amount` — both `f64`-backed and `Copy` — never a `&str`, so
+/// the source text can drop once `parse()` returns.
 #[derive(Deserialize)]
-struct Depth20 {
+struct Depth20<'a> {
     #[serde(rename = "lastUpdateId")]
     last_update_id: u64,
-    bids: Vec<[String; 2]>,
-    asks: Vec<[String; 2]>,
+    #[serde(borrow)]
+    bids: Vec<[&'a str; 2]>,
+    #[serde(borrow)]
+    asks: Vec<[&'a str; 2]>,
 }
 
 /// Builds the connect URL for a given trading pair, lowercased as the
@@ -62,7 +71,7 @@ pub fn parse(text: &str) -> Option<Book> {
 /// Converts `[price_str, amount_str]` pairs into `(Price, Amount)` levels.
 /// Returns `None` if any level fails to parse, rather than silently
 /// dropping a level and publishing a book with a hole in it.
-fn parse_levels(levels: &[[String; 2]]) -> Option<Vec<(Price, crate::model::Amount)>> {
+fn parse_levels(levels: &[[&str; 2]]) -> Option<Vec<(Price, crate::model::Amount)>> {
     levels
         .iter()
         .map(|[price, amount]| {

@@ -84,6 +84,22 @@ impl fmt::Display for Amount {
     }
 }
 
+// The gRPC wire schema (`proto/orderbook.proto`) fixes `Level.price`/
+// `Level.amount` as `double` — these are the one conversion point where a
+// `Price`/`Amount` becomes a bare `f64`, per the "convert at the boundary"
+// rule. `src/merge.rs` is the only caller.
+impl From<Price> for f64 {
+    fn from(price: Price) -> Self {
+        price.0
+    }
+}
+
+impl From<Amount> for f64 {
+    fn from(amount: Amount) -> Self {
+        amount.0
+    }
+}
+
 /// An exchange-agnostic order book snapshot: bids and asks, each already
 /// ordered best-first, plus the venue's own update sequence number.
 ///
