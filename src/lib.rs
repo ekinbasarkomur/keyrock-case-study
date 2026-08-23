@@ -12,6 +12,7 @@ pub mod config;
 pub mod exchange;
 pub mod model;
 pub mod proxy;
+pub mod server;
 pub mod telemetry;
 
 /// Generated from `proto/orderbook.proto`. Nothing consumes these types
