@@ -1,5 +1,5 @@
 //! The aggregator task: owns the last-seen book per venue, calls the pure
-//! [`crate::merge::summarise`], and publishes into the `watch` channel that
+//! [`crate::merge::merge`], and publishes into the `watch` channel that
 //! `src/server.rs` streams to gRPC clients.
 //!
 //! Single-owner task-local state, not `Arc<Mutex<_>>` — this task is the only
@@ -37,7 +37,7 @@ struct Aggregator {
 
 /// Receives `(Venue, Book)` pairs off the feed's `mpsc`, updates the
 /// corresponding venue slot, and publishes a fresh [`Summary`] into `tx`
-/// whenever [`merge::summarise`] produces one.
+/// whenever [`merge::merge`] produces one.
 ///
 /// Returns when `rx.recv()` yields `None` — the feed's `Sender` was dropped,
 /// so there's nothing left to aggregate. No explicit shutdown signalling: the
@@ -62,7 +62,7 @@ pub async fn run(mut rx: mpsc::Receiver<(Venue, Book)>, tx: watch::Sender<Option
             .iter()
             .map(|(v, s)| (*v, &s.book))
             .collect();
-        let summary = merge::summarise(&venues);
+        let summary = merge::merge(&venues);
         if let Some(summary) = summary {
             // `send` only fails once every receiver has been dropped —
             // nothing left to publish to, not worth logging or propagating.
