@@ -6,6 +6,12 @@
 use crate::model::{Book, Price};
 use serde::Deserialize;
 
+/// Binance's websocket host and port, named so `connect_url` and the proxy
+/// `CONNECT` tunnel (see `src/main.rs`) share one source instead of each
+/// hardcoding the pair separately.
+pub const HOST: &str = "stream.binance.com";
+pub const PORT: u16 = 9443;
+
 /// Binance's `depth20@100ms` payload shape. Only the fields this step needs
 /// are declared — `serde` ignores anything else Binance sends.
 #[derive(Deserialize)]
@@ -20,7 +26,7 @@ struct Depth20 {
 /// endpoint requires (e.g. `"ETHBTC"` -> `.../ethbtc@depth20@100ms`).
 pub fn connect_url(pair: &str) -> String {
     format!(
-        "wss://stream.binance.com:9443/ws/{}@depth20@100ms",
+        "wss://{HOST}:{PORT}/ws/{}@depth20@100ms",
         pair.to_lowercase()
     )
 }

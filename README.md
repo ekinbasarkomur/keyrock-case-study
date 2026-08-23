@@ -84,6 +84,14 @@ hand.
 
 Logs go to stderr so stdout stays pipeable.
 
+If `HTTPS_PROXY` (or `HTTP_PROXY`) is set, the Binance connection tunnels
+through it via an HTTP `CONNECT` handshake instead of dialing Binance
+directly — useful on networks that can't reach `stream.binance.com`
+directly. Unset, behavior is unchanged. `compose.yml` builds this from
+`PROXY_HOST`/`PROXY_PORT` in `.env` (see `.env.example`); a malformed proxy
+value falls back to a direct connection with a warning rather than failing
+to start.
+
 ## Price representation
 
 `Price`/`Amount` are thin newtypes over `f64` — chosen for type safety (the

@@ -13,10 +13,13 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use futures_util::StreamExt;
 use keyrock_case_study::exchange::binance;
+use keyrock_case_study::proxy::parse_proxy_addr;
 use keyrock_case_study::{config::Config, telemetry};
-use tokio_tungstenite::connect_async;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, info};
+use tokio_tungstenite::{client_async_tls, connect_async};
+use tracing::{debug, info, warn};
 
 #[derive(Parser)]
 #[command(name = "keyrock-case-study", version, about = "Keyrock case study")]
@@ -58,9 +61,21 @@ async fn main() -> Result<()> {
         .expect("no CryptoProvider installed yet — this is the first call");
 
     let url = binance::connect_url(&config.pair);
-    let (mut ws, _response) = connect_async(&url)
-        .await
-        .with_context(|| format!("failed to connect to Binance at {url}"))?;
+    let (mut ws, _response) = match proxy_addr() {
+        Some((proxy_host, proxy_port)) => {
+            info!(proxy = %format!("{proxy_host}:{proxy_port}"), "connecting to binance via HTTP CONNECT proxy");
+            let tunnel =
+                connect_through_proxy(&proxy_host, proxy_port, binance::HOST, binance::PORT)
+                    .await
+                    .context("failed to establish CONNECT tunnel to binance through proxy")?;
+            client_async_tls(&url, tunnel)
+                .await
+                .with_context(|| format!("failed to connect to Binance at {url} via proxy"))?
+        }
+        None => connect_async(&url)
+            .await
+            .with_context(|| format!("failed to connect to Binance at {url}"))?,
+    };
     info!(url = %url, "connected to binance");
 
     // Single `next()` loop over the bidirectional stream — no `.split()`,
@@ -105,4 +120,84 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Reads `HTTPS_PROXY` (preferred) or `HTTP_PROXY` and parses it into a
+/// `(host, port)` pair, e.g. `"http://100.64.x.x:3128"` -> `("100.64.x.x",
+/// 3128)`. Returns `None` if neither is set, or if the value is set but
+/// doesn't parse — a malformed proxy env var is a reason to log a warning
+/// and connect directly, not to crash a binary that would otherwise run
+/// fine (see `specs/002-binance-feed/revisions.md`, entry 2).
+fn proxy_addr() -> Option<(String, u16)> {
+    let raw = std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("HTTP_PROXY"))
+        .ok()?;
+    // compose.yml's PROXY_HOST/PROXY_PORT defaults produce a literal
+    // "http://:" (not an absent env var) when neither is set in `.env` —
+    // treat that specific empty-template shape as "no proxy configured"
+    // rather than warning on every default run.
+    if raw.trim_end_matches('/').ends_with("://:") {
+        return None;
+    }
+    match parse_proxy_addr(&raw) {
+        Some(addr) => Some(addr),
+        None => {
+            warn!(value = %raw, "HTTPS_PROXY/HTTP_PROXY is set but not a parseable host:port — connecting directly");
+            None
+        }
+    }
+}
+
+/// Opens a plain TCP connection to the proxy and issues an HTTP `CONNECT`
+/// for `target_host:target_port`, returning the tunneled `TcpStream` once
+/// the proxy answers `200`. The caller then hands this stream to
+/// `client_async_tls`, which performs the real TLS handshake through the
+/// tunnel — the proxy only ever sees opaque bytes after this point.
+async fn connect_through_proxy(
+    proxy_host: &str,
+    proxy_port: u16,
+    target_host: &str,
+    target_port: u16,
+) -> Result<TcpStream> {
+    let mut stream = TcpStream::connect((proxy_host, proxy_port))
+        .await
+        .with_context(|| format!("failed to connect to proxy at {proxy_host}:{proxy_port}"))?;
+
+    let request = format!(
+        "CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .context("failed to write CONNECT request to proxy")?;
+
+    let response = read_http_response_headers(&mut stream).await?;
+    let status_line = response.lines().next().unwrap_or("");
+    if !status_line.contains(" 200 ") {
+        anyhow::bail!("proxy CONNECT to {target_host}:{target_port} failed: {status_line}");
+    }
+
+    Ok(stream)
+}
+
+/// Reads from `stream` one byte at a time until the `\r\n\r\n` header
+/// terminator. A proxy's CONNECT response is a handful of header lines, not
+/// a bulk transfer, so a full buffered HTTP parser would be overkill here.
+async fn read_http_response_headers(stream: &mut TcpStream) -> Result<String> {
+    let mut buf = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let n = stream
+            .read(&mut byte)
+            .await
+            .context("failed to read proxy CONNECT response")?;
+        if n == 0 {
+            anyhow::bail!("proxy closed the connection before completing the CONNECT response");
+        }
+        buf.push(byte[0]);
+        if buf.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    String::from_utf8(buf).context("proxy CONNECT response was not valid UTF-8")
 }
