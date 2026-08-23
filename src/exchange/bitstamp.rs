@@ -136,21 +136,37 @@ fn parse_levels(levels: &[[&str; 2]]) -> Option<Vec<(Price, Amount)>> {
 mod tests {
     use super::*;
 
-    // TODO(user): capture a real Bitstamp "data" fixture from
-    // wss://ws.bitstamp.net — attempted from this implementation
-    // environment on 2026-08-23 both directly and through the configured
-    // HTTP CONNECT proxy, using the project's actual tokio-tungstenite +
-    // rustls-tls-webpki-roots stack; both attempts (three retries each)
-    // failed identically with a TLS handshake EOF
-    // (`Io(Custom { kind: UnexpectedEof, error: "tls handshake eof" })`)
-    // immediately after the ClientHello, while `curl`/`openssl s_client`
-    // against the same host from the same machine completed the TLS
-    // handshake and a full websocket upgrade without issue — consistent
-    // with the host rejecting this rustls client's TLS fingerprint rather
-    // than an actual network-reachability problem. See
-    // specs/006-bitstamp/plan.md, "Expected Drift Triggers" for this
-    // outcome. The "data"-fixture parse test below is skipped, not
-    // fabricated, until a real capture is available.
+    // Captured from wss://ws.bitstamp.net (order_book_ethbtc channel) on
+    // 2026-08-23, direct connection, no proxy. First capture attempt failed
+    // with a TLS handshake EOF — root-caused to the `rustls` dependency
+    // shipping without its `tls12` feature (see Cargo.toml's `rustls` entry
+    // for the full story); this app could only ever offer TLS1.3 in its
+    // ClientHello, and Bitstamp's frontend drops a TLS1.3-only handshake.
+    // Binance's endpoint happens to accept TLS1.3, which hid the gap until
+    // now. Trimmed to 5 bids/5 asks from Bitstamp's real 100-level payload
+    // — the full envelope's other fields (`timestamp`, `microtimestamp`,
+    // `channel`) are the genuine values from the captured message.
+    const DATA_FIXTURE: &str = r#"{"data":{"timestamp":"1787511693","microtimestamp":"1787511693313188","bids":[["0.03163789","3.42951262"],["0.03163505","0.61258313"],["0.03162919","1.02115457"],["0.03162384","0.04990000"],["0.03162273","0.34284793"]],"asks":[["0.03164587","0.61236387"],["0.03164684","3.42951262"],["0.03165086","1.02045379"],["0.03166236","0.04990000"],["0.03166726","2.04002053"]]},"channel":"order_book_ethbtc","event":"data"}"#;
+
+    /// Bug caught: a wrong field path into the wrapped envelope (e.g.
+    /// reading `bids` at the top level instead of inside `data`) — the real
+    /// fixture's nesting is the thing a hand-built one couldn't be trusted
+    /// to reproduce faithfully.
+    #[test]
+    fn bitstamp_data_message_parses_to_the_right_levels_and_prices() {
+        let book = Bitstamp.parse(DATA_FIXTURE).expect("valid data payload");
+
+        assert_eq!(book.bids.len(), 5);
+        assert_eq!(book.asks.len(), 5);
+
+        let (best_bid_price, best_bid_amount) = book.bids[0];
+        assert_eq!(best_bid_price, Price::parse("0.03163789").unwrap());
+        assert_eq!(best_bid_amount, Amount::parse("3.42951262").unwrap());
+
+        let (best_ask_price, best_ask_amount) = book.asks[0];
+        assert_eq!(best_ask_price, Price::parse("0.03164587").unwrap());
+        assert_eq!(best_ask_amount, Amount::parse("0.61236387").unwrap());
+    }
 
     /// `bts:subscription_succeeded` is a benign lifecycle message, not a
     /// parse failure worth propagating — and its payload has no

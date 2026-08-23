@@ -21,7 +21,15 @@ rand = "0.10.2"
 # directly so `src/main.rs` can call into it. Discovered empirically in
 # Phase 3 when the live connection panicked at startup — see
 # `specs/002-binance-feed/`.
-rustls = { version = "0.23.43", default-features = false, features = ["ring"] }
+#
+# `tls12` added in 006-bitstamp: this entry's `default-features = false`
+# meant TLS1.2 support was compiled out crate-wide, so this binary could
+# only ever offer TLS1.3 in its ClientHello. Binance's endpoint happens to
+# accept TLS1.3, which hid the gap — Bitstamp's frontend doesn't, and drops
+# a TLS1.3-only handshake outright (confirmed via `openssl s_client -tls1_3`
+# reproducing the same drop against the same host). See
+# `specs/006-bitstamp/spec.md` for where this surfaced.
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
