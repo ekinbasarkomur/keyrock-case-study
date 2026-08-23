@@ -61,8 +61,8 @@ cargo fmt --check
 │   ├── config.rs         configuration, read from the environment
 │   ├── telemetry.rs      tracing setup (logs to stderr)
 │   ├── model.rs          Price/Amount newtypes and Book — exchange-agnostic
-│   ├── proxy.rs          parses HTTP_PROXY/HTTPS_PROXY for the optional
-│   │                     CONNECT tunnel
+│   ├── proxy.rs          parses HTTP_PROXY/HTTPS_PROXY and implements the
+│   │                     optional HTTP CONNECT tunnel
 │   ├── exchange/
 │   │   ├── mod.rs        declares the binance submodule — no trait yet,
 │   │   │                 see specs/002-binance-feed/spec.md

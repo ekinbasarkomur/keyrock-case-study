@@ -19,11 +19,13 @@ services:
       KEYROCK_LOG_LEVEL: ${KEYROCK_LOG_LEVEL:-info}
       # Binance isn't reachable directly from some networks. If PROXY_HOST/
       # PROXY_PORT are set in .env, the app tunnels its Binance connection
-      # through an HTTP CONNECT proxy at that address; left unset (the
-      # default), these resolve to an empty template the app recognizes as
-      # "no proxy configured" and ignores.
-      HTTP_PROXY: http://${PROXY_HOST:-}:${PROXY_PORT:-}
-      HTTPS_PROXY: http://${PROXY_HOST:-}:${PROXY_PORT:-}
+      # through an HTTP CONNECT proxy at that address. `:+` is compose's
+      # "substitute only if set and non-empty" form (unlike `:-`, which
+      # always substitutes something) — left unset (the default), these
+      # resolve to an empty string rather than a broken `http://:` value;
+      # the app treats an empty env var the same as an absent one.
+      HTTP_PROXY: ${PROXY_HOST:+http://${PROXY_HOST}:${PROXY_PORT}}
+      HTTPS_PROXY: ${PROXY_HOST:+http://${PROXY_HOST}:${PROXY_PORT}}
 
     # Compose's default project network: nothing external to create first,
     # so the repo runs with no manual setup.
