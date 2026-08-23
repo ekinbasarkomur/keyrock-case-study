@@ -5,16 +5,17 @@ finished service connects to Binance and Bitstamp order-book websocket
 feeds, merges the two books for one traded pair, and streams the spread plus
 the top 10 bids/asks over gRPC (`proto/orderbook.proto`).
 
-**Steps 0-2 of an 11-step build order have landed.** The binary connects to
+**Steps 0-3 of an 11-step build order have landed.** The binary connects to
 Binance's `depth20@100ms` websocket stream, parses each snapshot into the
-internal `Book` type, and logs the top of book to stderr on every update.
-Alongside that, a gRPC server (`src/server.rs`) implements the
-`OrderbookAggregator` service and streams a `Summary` — spread, top 10
-bids, top 10 asks — once a second, over `tonic`. That streamed data is
-still **fake/placeholder**, not real market data (see "gRPC server" below);
-wiring it to the real Binance feed is step 3. There is still no second
-venue (Bitstamp), no merge logic, and no reconnection/staleness handling —
-those are later steps. Later steps build on this without reshaping it.
+internal `Book` type, and sends it down an `mpsc` channel to an aggregator
+task. The aggregator task summarises the book and publishes it into a
+`watch` channel that a gRPC server (`src/server.rs`) streams to clients as
+a `Summary` — spread, top 10 bids, top 10 asks — over `tonic`, on every
+change. **This is real Binance market data end to end**: every streamed
+`Level.exchange` reads `"binance"`, not a placeholder. There is still no
+second venue (Bitstamp), no merge logic (this step summarises one book
+only), and no reconnection/staleness handling — those are later steps.
+Later steps build on this without reshaping it.
 
 ## Build order
 
@@ -23,7 +24,7 @@ those are later steps. Later steps build on this without reshaping it.
 | 0 | Scaffold: dependencies, proto, `build.rs`, CLI, config, Docker | Done |
 | 1 | Binance feed: connect, parse, print | Done |
 | 2 | gRPC server streaming a static/fake `Summary` | Done |
-| 3 | Wire step 1 into step 2 — first real end-to-end milestone | Not started |
+| 3 | Wire step 1 into step 2 — first real end-to-end milestone | Done |
 | 4 | Add the Bitstamp feed | Not started |
 | 5 | Real `merge()` + top-10 + spread — the core deliverable | Not started |
 | 6 | Reconnection + staleness handling | Not started |
@@ -52,23 +53,51 @@ docker compose up --build               # same thing, containerised
 ```
 
 Both parse arguments, build a `Config`, log a `starting` line to stderr,
-then run three concurrent tasks: the Binance feed (connects, parses,
-logs each `depth20` update to stderr), a fake-data writer, and the gRPC
-server (listens on `--port`, defaulting to `50051`). All logging goes to
-stderr; stdout stays empty. The process exits the moment any one of the
-three tasks ends — see "gRPC server" below.
+then run three concurrent tasks: the Binance feed (connects, parses each
+`depth20` update, logs it to stderr, and sends it down an `mpsc` channel),
+the aggregator (receives from that channel, summarises the book, and
+publishes into a `watch` channel), and the gRPC server (listens on
+`--port`, defaulting to `50051`, and streams the `watch` channel's value to
+every subscriber). All logging goes to stderr; stdout stays empty. The
+process exits the moment any one of the three tasks ends — see "gRPC
+server" below.
+
+The feed-to-aggregator `mpsc` channel is bounded at 32 rather than
+unbounded — an unbounded channel would hide a stuck aggregator behind
+unlimited memory growth instead of surfacing backpressure.
 
 ## gRPC server
 
 `src/server.rs` implements the `OrderbookAggregator` service from
-`proto/orderbook.proto` and streams a `Summary` once a second over a
-`tokio::sync::watch` channel. **The data is fake, not real market data**:
-10 bid levels and 10 ask levels clustered around the ETHBTC price scale,
-`Level.exchange` literally the string `"fake"` on every level, and a
-small positive spread — a placeholder built to prove the streaming
-plumbing (watch channel → `tonic` stream) before wiring in the real
-Binance feed at step 3. If `grpcurl` output shows `"exchange": "fake"`,
-that is expected at this stage, not a bug.
+`proto/orderbook.proto` and streams a `Summary` over a
+`tokio::sync::watch` channel, forwarding a new value to every subscriber
+whenever the aggregator publishes one. **The data is real Binance market
+data, end to end**: `src/aggregator.rs` receives each parsed `Book` from
+the feed over an `mpsc` channel, calls the pure `summarise()` in
+`src/merge.rs`, and publishes the result into the `watch` channel this
+server streams from. Every `Level.exchange` reads `"binance"`. Verified
+live against `stream.binance.com` (see "gRPC server" verification below,
+and Docker section) — `grpcurl` output looks like plausible real ETHBTC
+market data, not a static repeated value:
+
+```
+$ grpcurl -plaintext -max-time 3 127.0.0.1:50051 orderbook.OrderbookAggregator/BookSummary
+{
+  "spread": 1.0000000000003062e-05,
+  "bids": [
+    { "exchange": "binance", "price": 0.03158, "amount": 19.1949 },
+    { "exchange": "binance", "price": 0.03157, "amount": 91.9584 },
+    ...
+  ],
+  "asks": [
+    { "exchange": "binance", "price": 0.03159, "amount": 78.5329 },
+    ...
+  ]
+}
+```
+
+There is still only one venue (Binance) — merging a second venue's book
+and real spread computation across both is step 5.
 
 `tonic-reflection` is registered alongside the aggregator service, so a
 client can discover the schema without a local `.proto` file:
@@ -114,14 +143,20 @@ cargo fmt --check
 │   ├── proxy.rs          parses HTTP_PROXY/HTTPS_PROXY and implements the
 │   │                     optional HTTP CONNECT tunnel
 │   ├── exchange/
-│   │   ├── mod.rs        declares the binance submodule — no trait yet,
+│   │   ├── mod.rs        declares the binance submodule and the Venue enum
+│   │   │                 (Binance only for now) — no Exchange trait yet,
 │   │   │                 see specs/002-binance-feed/spec.md
 │   │   └── binance.rs    connect URL, read loop, parse() -> Option<Book>
-│   ├── server.rs         OrderbookAggregator gRPC service, reflection,
-│   │                     the watch-channel-to-stream plumbing, and the
-│   │                     fake-data writer (placeholder until step 3)
+│   ├── merge.rs          pure summarise(venue, book) -> Option<Summary> —
+│   │                     no clock, no I/O, no channel; the entry point
+│   │                     step 5 widens into a real two-book merge()
+│   ├── aggregator.rs     owns the last-seen Book per venue as task-local
+│   │                     state (fed over the mpsc from the feed), drives
+│   │                     summarise(), and publishes into the watch channel
+│   ├── server.rs         OrderbookAggregator gRPC service, reflection, and
+│   │                     the watch-channel-to-stream plumbing
 │   └── main.rs           CLI entry point — parses arguments, spawns the
-│                         feed, fake writer, and gRPC server tasks under
+│                         feed, aggregator, and gRPC server tasks under
 │                         one select!
 └── tests/
     ├── cli.rs            integration tests: the real binary, as a subprocess
@@ -141,7 +176,7 @@ flags and no environment at all.
 
 | Setting | Flag | Env var | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| Pair | `--pair` | `KEYROCK_PAIR` | `ethbtc` | Traded pair the Binance feed subscribes to; not yet used by the gRPC server (fake data until step 3). |
+| Pair | `--pair` | `KEYROCK_PAIR` | `ethbtc` | Traded pair the Binance feed subscribes to; the gRPC server streams this pair's real book as of step 3. |
 | Port | `--port` | `KEYROCK_PORT` | `50051` | Port the gRPC server binds. An unparseable `KEYROCK_PORT` is a startup error. |
 | Log level | — | `KEYROCK_LOG_LEVEL` | `info` | `RUST_LOG`-style filter; an explicit `RUST_LOG` wins over this. |
 | Host | — | `KEYROCK_HOST` | `127.0.0.1` | Bind address for the gRPC server. Use `0.0.0.0` in a container. |
