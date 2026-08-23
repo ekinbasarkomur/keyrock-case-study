@@ -3,7 +3,11 @@
 #     docker compose up --build
 #     docker compose run --rm app --pair btcusd --port 12345
 #
-# No long-running service yet, so nothing to `up -d`, publish, or healthcheck.
+# The gRPC server (landed in 004-grpc-server) keeps the container running —
+# it does not log a line and exit. `docker compose up` stays attached to a
+# live process serving gRPC on the published port below, alongside the
+# Binance feed and (for now, until step 3 wires the real aggregator) the
+# fake-data writer.
 
 services:
   app:
@@ -17,6 +21,11 @@ services:
 
     environment:
       KEYROCK_LOG_LEVEL: ${KEYROCK_LOG_LEVEL:-info}
+      # 127.0.0.1 inside the container is the container's own loopback, not
+      # the host's — binding there would make the published port below
+      # refuse every connection while the container's own logs look
+      # perfectly healthy. See Config::host's doc comment (src/config.rs).
+      KEYROCK_HOST: 0.0.0.0
       # Binance isn't reachable directly from some networks. If PROXY_HOST/
       # PROXY_PORT are set in .env, the app tunnels its Binance connection
       # through an HTTP CONNECT proxy at that address. `:+` is compose's
@@ -27,7 +36,15 @@ services:
       HTTP_PROXY: ${PROXY_HOST:+http://${PROXY_HOST}:${PROXY_PORT}}
       HTTPS_PROXY: ${PROXY_HOST:+http://${PROXY_HOST}:${PROXY_PORT}}
 
+    # Host-loopback only, matching this project's posture of not exposing
+    # anything beyond the local machine — never 0.0.0.0:50051:50051.
+    ports:
+      - "127.0.0.1:50051:50051"
+
     # Compose's default project network: nothing external to create first,
     # so the repo runs with no manual setup.
 
-    # When a server lands: publish on loopback only and set KEYROCK_HOST=0.0.0.0.
+    # Expected, not a defect: on a network the container can't reach Binance
+    # from (directly or via the PROXY_HOST/PROXY_PORT pass-through above),
+    # the container exits shortly after starting — the three-task select!
+    # in main.rs ends the whole process the instant the feed task ends.
