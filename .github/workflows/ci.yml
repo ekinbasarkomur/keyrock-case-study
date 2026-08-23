@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # protoc is not bundled by the resolved tonic-prost-build version
+      # (confirmed empirically in step 0 — see Dockerfile) — the builder
+      # stage needs it, and so does this runner.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      # rustup (preinstalled on GitHub's runners) reads rust-toolchain.toml
+      # automatically and installs the pinned 1.97.1 plus rustfmt/clippy —
+      # no explicit toolchain action needed.
+      - name: Show toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Test
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --check
