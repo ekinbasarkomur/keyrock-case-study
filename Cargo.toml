@@ -11,6 +11,17 @@ prost = "0.14.4"
 # 0.10 is recent — most examples online are still on 0.8/0.9 syntax and won't
 # compile. Check docs.rs for this version when jitter lands at step 6.
 rand = "0.10.2"
+# Not one of the crates listed in step 0's Tooling table — pulled in here as
+# a direct dependency only because rustls 0.23+ no longer installs a default
+# `CryptoProvider` implicitly from a Cargo feature; the app must call
+# `install_default()` once before the first TLS connection, which needs this
+# import. `tokio-tungstenite`'s `rustls-tls-webpki-roots` feature already
+# resolves `rustls` transitively with the `ring` provider (confirmed via
+# `Cargo.lock`); this just names the same already-resolved crate/feature
+# directly so `src/main.rs` can call into it. Discovered empirically in
+# Phase 3 when the live connection panicked at startup — see
+# `specs/002-binance-feed/`.
+rustls = { version = "0.23.43", default-features = false, features = ["ring"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
