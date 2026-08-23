@@ -6,16 +6,19 @@
 //! shaped for a future two-book signature (step 5's real `merge()`), not a
 //! rename later.
 
+use std::collections::BTreeMap;
+
 use crate::exchange::Venue;
 use crate::model::Book;
 use crate::orderbook::{Level, Summary};
 
-/// Takes the first 10 bids and first 10 asks from `book` (Binance already
-/// hands over a sorted `depth20` snapshot, so this is truncation, not
-/// sorting — the real sort/merge work is step 5's), and computes the spread.
-/// Returns `None` if there's no book yet to summarise.
-pub fn summarise(venue: Venue, book: Option<&Book>) -> Option<Summary> {
-    let book = book?;
+/// Takes the first 10 bids and first 10 asks from the map's first
+/// (lowest-ordered) venue's book (Binance already hands over a sorted
+/// `depth20` snapshot, so this is truncation, not sorting — the real
+/// sort/merge work is step 5's), and computes the spread. Returns `None` if
+/// the map is empty.
+pub fn summarise(venues: &BTreeMap<Venue, &Book>) -> Option<Summary> {
+    let (&venue, &book) = venues.iter().next()?;
 
     // A one-sided book has no publishable spread, so nothing gets
     // published — same reasoning as filtering `None` out of the watch
@@ -85,8 +88,8 @@ mod tests {
             .collect();
         let book = book_from(&bids, &asks);
 
-        let summary =
-            summarise(Venue::Binance, Some(&book)).expect("Some(book) yields Some(summary)");
+        let summary = summarise(&BTreeMap::from([(Venue::Binance, &book)]))
+            .expect("Some(book) yields Some(summary)");
 
         assert_eq!(summary.bids.len(), 10);
         assert_eq!(summary.asks.len(), 10);
@@ -104,8 +107,8 @@ mod tests {
             &[("0.0316", "1.0"), ("0.0317", "1.0"), ("0.0318", "1.0")],
         );
 
-        let summary =
-            summarise(Venue::Binance, Some(&book)).expect("Some(book) yields Some(summary)");
+        let summary = summarise(&BTreeMap::from([(Venue::Binance, &book)]))
+            .expect("Some(book) yields Some(summary)");
 
         let bid_prices: Vec<f64> = summary.bids.iter().map(|level| level.price).collect();
         let ask_prices: Vec<f64> = summary.asks.iter().map(|level| level.price).collect();
@@ -121,18 +124,18 @@ mod tests {
         let asks: Vec<(&str, &str)> = (0..6).map(|_| ("0.0316", "1.0")).collect();
         let book = book_from(&bids, &asks);
 
-        let summary =
-            summarise(Venue::Binance, Some(&book)).expect("Some(book) yields Some(summary)");
+        let summary = summarise(&BTreeMap::from([(Venue::Binance, &book)]))
+            .expect("Some(book) yields Some(summary)");
 
         assert_eq!(summary.bids.len(), 6);
         assert_eq!(summary.asks.len(), 6);
     }
 
-    /// `summarise(Venue::Binance, None)` returns `None` — catches a panic or
+    /// `summarise(&BTreeMap::new())` returns `None` — catches a panic or
     /// a synthesized-empty-summary bug on the "no data yet" path.
     #[test]
     fn summarise_with_no_book_returns_none() {
-        assert_eq!(summarise(Venue::Binance, None), None);
+        assert_eq!(summarise(&BTreeMap::new()), None);
     }
 
     /// A one-sided book (one side has no levels) returns `None`, not a
@@ -143,6 +146,6 @@ mod tests {
     #[test]
     fn summarise_on_a_one_sided_book_returns_none() {
         let book = book_from(&[("0.0314", "1.0")], &[]);
-        assert_eq!(summarise(Venue::Binance, Some(&book)), None);
+        assert_eq!(summarise(&BTreeMap::from([(Venue::Binance, &book)])), None);
     }
 }
