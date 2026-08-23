@@ -120,7 +120,13 @@ pub fn merge(venues: &BTreeMap<Venue, &Book>) -> Option<Summary> {
     // trade — but across two independently-matched venues it's routine, and
     // represents a real (if fleeting) arbitrage opportunity worth reporting
     // honestly rather than hiding.
-    let spread = best_ask.price - best_bid.price;
+    // The spread is the only computed value on the wire — price and amount are
+    // parsed and passed through, so they round-trip exactly. Rounding to the
+    // venues' 8-decimal tick keeps 0.031505 - 0.031500 from publishing as
+    // 4.9999999999980616e-06. This is the boundary rounding that made
+    // fixed-point unnecessary internally. Rounding preserves sign, so a
+    // crossed (negative) spread stays negative.
+    let spread = ((best_ask.price - best_bid.price) * 1e8).round() / 1e8;
 
     Some(Summary { spread, bids, asks })
 }

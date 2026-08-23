@@ -80,7 +80,8 @@ production should ship without a toggle.
   two million ETHBTC price-pair samples showed no disagreement with an `f64`
   at 8 decimals (`specs/002-binance-feed/revisions.md` entry 1). Kept: the
   newtype boundary and a total order (`Ord` via `total_cmp`). Dropped: the
-  integer domain.
+  integer domain. The one computed (not passed-through) value, the spread,
+  is rounded to that same 8-decimal tick at the boundary — see "production."
 - **One `Exchange` trait, kept synchronous** — introduced in step 4 once
   there were two implementations to abstract over. `async fn` in a trait
   can't be used behind `dyn Trait` anyway, and every call site is a concrete
@@ -183,3 +184,11 @@ the only signal.
 **`merge()` returns the proto `Summary`/`Level` types directly**, with no
 internal `MergedBook` decoupling them from the wire format — indirection
 without payoff at one consumer, worth revisiting with a second one.
+
+**The spread is rounded to a hardcoded 8-decimal tick**, same assumption as
+`Price`/`Amount` above, not derived per pair. The correct fix is the same in
+both places: per-pair tick size from each exchange's `exchangeInfo`.
+
+**Every `Level.exchange` is a fresh `String`** — twenty allocations per
+published message, forced by the proto schema. Known and accepted, not
+optimized away; would matter if allocation showed up in profiling.
