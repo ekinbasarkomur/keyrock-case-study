@@ -29,6 +29,10 @@ rand = "0.10.2"
 # a TLS1.3-only handshake outright (confirmed via `openssl s_client -tls1_3`
 # reproducing the same drop against the same host). See
 # `specs/006-bitstamp/spec.md` for where this surfaced.
+#
+# `tls12` because Bitstamp's frontend refuses a TLS1.3-only handshake —
+# without it the connection dies at the handshake with an EOF. Invisible
+# until step 4 because Binance accepts TLS1.3.
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

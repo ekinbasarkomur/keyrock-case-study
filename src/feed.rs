@@ -125,6 +125,11 @@ pub async fn run_feed<E: Exchange>(
 /// `Exchange` trait only exposes the full URL, not host/port separately —
 /// see `specs/006-bitstamp/plan.md`, "Plan Review Notes" for why this lives
 /// here instead of on the trait.
+//
+// A deliberate trade: the trait exposes a URL, so host and port are
+// re-derived from it here rather than adding a fifth `connect_target()`
+// method. Keeps the trait at four methods; costs one small parse of a
+// string we produced.
 fn parse_connect_target(url: &str) -> (String, u16) {
     let without_scheme = url.strip_prefix("wss://").unwrap_or(url);
     let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
