@@ -12,6 +12,22 @@ There is still no second venue (Bitstamp), no merge logic, and no gRPC
 server — those are later steps. Later steps build on this without
 reshaping it.
 
+## Build order
+
+| Step | What it is | Status |
+| --- | --- | --- |
+| 0 | Scaffold: dependencies, proto, `build.rs`, CLI, config, Docker | Done |
+| 1 | Binance feed: connect, parse, print | Done |
+| 2 | gRPC server streaming a static/fake `Summary` | Not started |
+| 3 | Wire step 1 into step 2 — first real end-to-end milestone | Not started |
+| 4 | Add the Bitstamp feed | Not started |
+| 5 | Real `merge()` + top-10 + spread — the core deliverable | Not started |
+| 6 | Reconnection + staleness handling | Not started |
+| 7 | Remaining edge cases | Not started |
+| 8 | Latency measurement (p50/p99), written up here | Not started |
+| 9 | Add the `client` binary to `compose.yml` | Not started |
+| 10 | README pass, final cleanup | Not started |
+
 ## Requirements
 
 - Rust 1.97.1 — `rust-toolchain.toml` pins it, `rustup` installs it
