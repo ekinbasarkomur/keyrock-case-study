@@ -11,6 +11,7 @@
 pub mod aggregator;
 pub mod config;
 pub mod exchange;
+pub mod feed;
 pub mod merge;
 pub mod model;
 pub mod proxy;

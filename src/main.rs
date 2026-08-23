@@ -4,29 +4,31 @@
 //! worth testing belongs in the library crate (`src/lib.rs`), which the
 //! integration tests in `tests/` can actually reach.
 //!
-//! Three tasks run concurrently from here: the Binance feed loop (unchanged
-//! in behavior from step 1, just moved into [`run_feed`] so it can be
-//! spawned), the aggregator task (`aggregator::run`, step 3 — owns per-venue
-//! book state, calls `merge::summarise`, publishes into the watch channel),
-//! and the gRPC server (`server::router(rx).serve(addr)`). See the
-//! `select!` at the bottom of [`main`] for why all three are supervised
-//! together rather than run sequentially or fire-and-forgotten.
+//! Four tasks run concurrently from here: the Binance and Bitstamp feeds
+//! (`feed::run_feed::<Binance>` and `feed::run_feed::<Bitstamp>` — the
+//! generic driver loop shared by every `Exchange` implementation lives in
+//! `src/feed.rs`, not here; this file only constructs each `Exchange` impl
+//! and spawns it, both sending into the same `mpsc::Sender`), the
+//! aggregator task (`aggregator::run`, step 3 — owns per-venue book state,
+//! calls `merge::summarise`, publishes into the watch channel), and the
+//! gRPC server (`server::router(rx).serve(addr)`). See the `select!` at the
+//! bottom of [`main`] for why all four are supervised together rather than
+//! run sequentially or fire-and-forgotten. gRPC output stays single-venue
+//! this step (`summarise` reads the map's lowest-ordered entry) — real
+//! two-book merging is step 5.
 
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use futures_util::StreamExt;
 use keyrock_case_study::exchange::Venue;
-use keyrock_case_study::exchange::binance;
+use keyrock_case_study::exchange::binance::Binance;
+use keyrock_case_study::exchange::bitstamp::Bitstamp;
 use keyrock_case_study::model::Book;
-use keyrock_case_study::proxy::{self, parse_proxy_addr};
-use keyrock_case_study::{aggregator, server};
+use keyrock_case_study::{aggregator, feed, server};
 use keyrock_case_study::{config::Config, telemetry};
 use tokio::sync::{mpsc, watch};
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{client_async_tls, connect_async};
-use tracing::{debug, info, warn};
+use tracing::info;
 
 #[derive(Parser)]
 #[command(name = "keyrock-case-study", version, about = "Keyrock case study")]
@@ -84,7 +86,10 @@ async fn main() -> Result<()> {
     let (feed_tx, feed_rx) = mpsc::channel::<(Venue, Book)>(32);
 
     let pair = config.pair.clone();
-    let feed_handle = tokio::spawn(async move { run_feed(pair, feed_tx).await });
+    let binance_tx = feed_tx.clone();
+    let bitstamp_tx = feed_tx;
+    let binance_handle = tokio::spawn(feed::run_feed(Binance, pair.clone(), binance_tx));
+    let bitstamp_handle = tokio::spawn(feed::run_feed(Bitstamp, pair, bitstamp_tx));
     let aggregator_handle = tokio::spawn(aggregator::run(feed_rx, tx));
     let server_handle = tokio::spawn(async move { server::router(rx).serve(addr).await });
 
@@ -102,13 +107,21 @@ async fn main() -> Result<()> {
     // propagating that task's error (or exiting cleanly if it ended without
     // one).
     tokio::select! {
-        res = feed_handle => match res {
+        res = binance_handle => match res {
             Ok(Ok(())) => {
-                info!("feed task ended");
+                info!("binance feed task ended");
                 Ok(())
             }
-            Ok(Err(e)) => Err(e).context("feed task failed"),
-            Err(e) => Err(e).context("feed task panicked"),
+            Ok(Err(e)) => Err(e).context("binance feed task failed"),
+            Err(e) => Err(e).context("binance feed task panicked"),
+        },
+        res = bitstamp_handle => match res {
+            Ok(Ok(())) => {
+                info!("bitstamp feed task ended");
+                Ok(())
+            }
+            Ok(Err(e)) => Err(e).context("bitstamp feed task failed"),
+            Err(e) => Err(e).context("bitstamp feed task panicked"),
         },
         res = aggregator_handle => match res {
             Ok(()) => {
@@ -125,103 +138,5 @@ async fn main() -> Result<()> {
             Ok(Err(e)) => Err(e).context("server task failed"),
             Err(e) => Err(e).context("server task panicked"),
         },
-    }
-}
-
-/// The Binance feed loop — connect, read frames, log the top of book, and
-/// send each parsed [`Book`] down `tx` to the aggregator task. Structurally
-/// identical to what step 1 ran directly in `main`'s own task; moved into
-/// its own function only so it can be `tokio::spawn`ed alongside the
-/// aggregator and the gRPC server.
-async fn run_feed(pair: String, tx: mpsc::Sender<(Venue, Book)>) -> Result<()> {
-    let url = binance::connect_url(&pair);
-    let (mut ws, _response) = match proxy_addr() {
-        Some((proxy_host, proxy_port)) => {
-            info!(proxy = %format!("{proxy_host}:{proxy_port}"), "connecting to binance via HTTP CONNECT proxy");
-            let tunnel =
-                proxy::connect_through_proxy(&proxy_host, proxy_port, binance::HOST, binance::PORT)
-                    .await
-                    .context("failed to establish CONNECT tunnel to binance through proxy")?;
-            client_async_tls(&url, tunnel)
-                .await
-                .with_context(|| format!("failed to connect to Binance at {url} via proxy"))?
-        }
-        None => connect_async(&url)
-            .await
-            .with_context(|| format!("failed to connect to Binance at {url}"))?,
-    };
-    info!(url = %url, "connected to binance");
-
-    // Single `next()` loop over the bidirectional stream — no `.split()`.
-    // This step never writes anything itself beyond what `tokio-tungstenite`
-    // answers automatically (pongs), so one task reading is sufficient.
-    while let Some(message) = ws.next().await {
-        let message = message.context("websocket read failed")?;
-        match message {
-            Message::Text(text) => {
-                if let Some(book) = binance::parse(&text) {
-                    if let (Some((bid_price, bid_amount)), Some((ask_price, ask_amount))) =
-                        (book.bids.first(), book.asks.first())
-                    {
-                        info!(
-                            "binance {} | bid {} x {} | ask {} x {} | id {}",
-                            pair, bid_price, bid_amount, ask_price, ask_amount, book.last_update_id
-                        );
-                    }
-                    // A bounded `.send(...).await` naturally backpressures
-                    // the feed if the aggregator falls behind — the point of
-                    // decision 1's bounded channel, not a bug. A failed send
-                    // (aggregator's `Receiver` gone) doesn't kill this loop:
-                    // the aggregator ending already ends the whole process
-                    // via `select!`, so there's nothing extra to do here.
-                    let _ = tx.send((Venue::Binance, book)).await;
-                }
-            }
-            // `tokio-tungstenite` answers pings automatically; nothing to do
-            // for either side of the ping/pong exchange here.
-            Message::Ping(_) | Message::Pong(_) => {}
-            // No reconnection in this step (that's step 6) — a close frame
-            // simply ends the read loop and the process exits.
-            Message::Close(_) => {
-                info!("binance closed the connection");
-                break;
-            }
-            Message::Binary(_) => {
-                debug!("ignoring unexpected binary message");
-            }
-            // Structurally required for the match to be exhaustive —
-            // `tungstenite::Message` has no `#[non_exhaustive]`, even though
-            // `.next()` on a client-API stream never actually produces this
-            // variant (it's only reachable via the raw-frame API this code
-            // doesn't use).
-            Message::Frame(_) => {
-                debug!("ignoring raw frame message");
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Reads `HTTPS_PROXY` (preferred) or `HTTP_PROXY` and parses it into a
-/// `(host, port)` pair, e.g. `"http://100.64.x.x:3128"` -> `("100.64.x.x",
-/// 3128)`. Returns `None` if neither is set, if the value is empty (how
-/// `compose.yml` represents "`PROXY_HOST`/`PROXY_PORT` weren't given" —
-/// an unset env var and a blank one both mean the same thing here, so
-/// there's nothing proxy-specific to special-case), or if the value is set
-/// but doesn't parse — a malformed proxy env var is a reason to log a
-/// warning and connect directly, not to crash a binary that would
-/// otherwise run fine (see `specs/002-binance-feed/revisions.md`, entry 2).
-fn proxy_addr() -> Option<(String, u16)> {
-    let raw = std::env::var("HTTPS_PROXY")
-        .or_else(|_| std::env::var("HTTP_PROXY"))
-        .ok()
-        .filter(|raw| !raw.is_empty())?;
-    match parse_proxy_addr(&raw) {
-        Some(addr) => Some(addr),
-        None => {
-            warn!(value = %raw, "HTTPS_PROXY/HTTP_PROXY is set but not a parseable host:port — connecting directly");
-            None
-        }
     }
 }

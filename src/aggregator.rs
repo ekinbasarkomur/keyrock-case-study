@@ -7,6 +7,7 @@
 //! concurrent access that structurally cannot happen (see
 //! `specs/005-aggregator/spec.md` decision 2).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -27,11 +28,11 @@ struct VenueState {
     last_update: Instant,
 }
 
-/// Per-venue state the aggregator owns across the lifetime of the task.
-/// `Option` because there's nothing to publish before the first message from
-/// a venue arrives.
+/// Per-venue state the aggregator owns across the lifetime of the task. An
+/// empty map is the "nothing to publish yet" state — no venue has sent a
+/// message.
 struct Aggregator {
-    binance: Option<VenueState>,
+    venues: BTreeMap<Venue, VenueState>,
 }
 
 /// Receives `(Venue, Book)` pairs off the feed's `mpsc`, updates the
@@ -43,22 +44,25 @@ struct Aggregator {
 /// caller's `select!` already ends the whole process when any one task ends,
 /// the same supervision shape step 2 established.
 pub async fn run(mut rx: mpsc::Receiver<(Venue, Book)>, tx: watch::Sender<Option<Arc<Summary>>>) {
-    let mut aggregator = Aggregator { binance: None };
+    let mut aggregator = Aggregator {
+        venues: BTreeMap::new(),
+    };
 
     while let Some((venue, book)) = rx.recv().await {
-        // A real match, not a single-arm shortcut: adding Bitstamp in step 4
-        // makes this fail to compile until a new arm updates its own slot,
-        // per spec.md decision 3.
-        match venue {
-            Venue::Binance => {
-                aggregator.binance = Some(VenueState {
-                    book,
-                    last_update: Instant::now(),
-                });
-            }
-        }
+        aggregator.venues.insert(
+            venue,
+            VenueState {
+                book,
+                last_update: Instant::now(),
+            },
+        );
 
-        let summary = merge::summarise(venue, aggregator.binance.as_ref().map(|s| &s.book));
+        let venues: BTreeMap<Venue, &Book> = aggregator
+            .venues
+            .iter()
+            .map(|(v, s)| (*v, &s.book))
+            .collect();
+        let summary = merge::summarise(&venues);
         if let Some(summary) = summary {
             // `send` only fails once every receiver has been dropped —
             // nothing left to publish to, not worth logging or propagating.
