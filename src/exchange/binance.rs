@@ -1,8 +1,9 @@
 //! Binance `depth20@100ms` feed: the connect URL and the pure `parse`
-//! function. No websocket connection is opened here — that's Phase 3's
-//! `src/main.rs` read loop; this file proves `parse` is correct against
-//! fixtures first (see `specs/002-binance-feed/plan.md`).
+//! function, behind the `Exchange` trait. No websocket connection is opened
+//! here — that's `src/feed.rs::run_feed`'s job; this file proves `parse` is
+//! correct against fixtures first (see `specs/002-binance-feed/plan.md`).
 
+use crate::exchange::{Exchange, Venue};
 use crate::model::{Book, Price};
 use serde::Deserialize;
 
@@ -31,41 +32,58 @@ struct Depth20<'a> {
     asks: Vec<[&'a str; 2]>,
 }
 
-/// Builds the connect URL for a given trading pair, lowercased as the
-/// endpoint requires (e.g. `"ETHBTC"` -> `.../ethbtc@depth20@100ms`).
-pub fn connect_url(pair: &str) -> String {
-    format!(
-        "wss://{HOST}:{PORT}/ws/{}@depth20@100ms",
-        pair.to_lowercase()
-    )
-}
+/// Binance's `Exchange` implementation. A unit struct — everything it needs
+/// (the host/port constants, the parse logic) is free-standing in this
+/// module already; the struct exists only to carry the trait impl.
+pub struct Binance;
 
-/// Parses a raw websocket text message into a [`Book`].
-///
-/// Returns `None` — never `Result` — for anything that isn't a recognizable
-/// book payload: malformed JSON, a control/lifecycle message like
-/// `{"e":"serverShutdown",...}`, or a price/amount string that doesn't
-/// parse. A `?`-based `Result` here would let a stray non-book message kill
-/// a future read loop; `Option` makes "that wasn't a book" a normal,
-/// expected outcome (see `specs/002-binance-feed/spec.md`, "Proposed
-/// Design").
-pub fn parse(text: &str) -> Option<Book> {
-    let raw: Depth20 = match serde_json::from_str(text) {
-        Ok(raw) => raw,
-        Err(err) => {
-            tracing::debug!(%err, "not a depth20 payload, skipping");
-            return None;
-        }
-    };
+impl Exchange for Binance {
+    fn venue(&self) -> Venue {
+        Venue::Binance
+    }
 
-    let bids = parse_levels(&raw.bids)?;
-    let asks = parse_levels(&raw.asks)?;
+    /// Builds the connect URL for a given trading pair, lowercased as the
+    /// endpoint requires (e.g. `"ETHBTC"` -> `.../ethbtc@depth20@100ms`).
+    fn connect_url(&self, pair: &str) -> String {
+        format!(
+            "wss://{HOST}:{PORT}/ws/{}@depth20@100ms",
+            pair.to_lowercase()
+        )
+    }
 
-    Some(Book {
-        bids,
-        asks,
-        last_update_id: raw.last_update_id,
-    })
+    /// Binance's subscription is baked into the connect URL — nothing to
+    /// send after connecting.
+    fn subscribe_message(&self, _pair: &str) -> Option<String> {
+        None
+    }
+
+    /// Parses a raw websocket text message into a [`Book`].
+    ///
+    /// Returns `None` — never `Result` — for anything that isn't a
+    /// recognizable book payload: malformed JSON, a control/lifecycle
+    /// message like `{"e":"serverShutdown",...}`, or a price/amount string
+    /// that doesn't parse. A `?`-based `Result` here would let a stray
+    /// non-book message kill a future read loop; `Option` makes "that
+    /// wasn't a book" a normal, expected outcome (see
+    /// `specs/002-binance-feed/spec.md`, "Proposed Design").
+    fn parse(&self, text: &str) -> Option<Book> {
+        let raw: Depth20 = match serde_json::from_str(text) {
+            Ok(raw) => raw,
+            Err(err) => {
+                tracing::debug!(%err, "not a depth20 payload, skipping");
+                return None;
+            }
+        };
+
+        let bids = parse_levels(&raw.bids)?;
+        let asks = parse_levels(&raw.asks)?;
+
+        Some(Book {
+            bids,
+            asks,
+            last_update_id: raw.last_update_id,
+        })
+    }
 }
 
 /// Converts `[price_str, amount_str]` pairs into `(Price, Amount)` levels.
@@ -92,7 +110,9 @@ mod tests {
 
     #[test]
     fn parses_depth20_into_twenty_bids_and_twenty_asks_with_correct_values() {
-        let book = parse(DEPTH20_FIXTURE).expect("valid depth20 payload");
+        let book = Binance
+            .parse(DEPTH20_FIXTURE)
+            .expect("valid depth20 payload");
 
         assert_eq!(book.bids.len(), 20);
         assert_eq!(book.asks.len(), 20);
@@ -129,11 +149,20 @@ mod tests {
 
     #[test]
     fn server_shutdown_message_parses_to_none_without_panicking() {
-        assert!(parse(r#"{"e":"serverShutdown","E":1234567890}"#).is_none());
+        assert!(
+            Binance
+                .parse(r#"{"e":"serverShutdown","E":1234567890}"#)
+                .is_none()
+        );
     }
 
     #[test]
     fn malformed_json_parses_to_none_without_panicking() {
-        assert!(parse("not valid json {{{").is_none());
+        assert!(Binance.parse("not valid json {{{").is_none());
+    }
+
+    #[test]
+    fn binance_subscribe_message_is_none() {
+        assert_eq!(Binance.subscribe_message("ethbtc"), None);
     }
 }
