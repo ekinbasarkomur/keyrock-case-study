@@ -8,85 +8,139 @@
 //! points at the binary built for THIS test run. Hardcoding `target/debug/...`
 //! silently tests a stale binary once anyone runs `--release`.
 
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 const BIN: &str = env!("CARGO_BIN_EXE_keyrock-case-study");
 
-// The four tests below predate Phase 3 of specs/002-binance-feed: as of
-// that phase, `main` connects to Binance and loops forever reading the
-// websocket (per spec.md, no bounded-run mode exists yet, and none was
-// asked for). That makes "run the binary and wait for it to exit" no
-// longer a valid way to observe the config/CLI-precedence log line — in an
-// environment with real network access to Binance the child process never
-// exits and `Command::output()` hangs; in an environment where the
-// connection is refused/reset it exits non-zero once the connect attempt
-// fails, which is not what these assertions expect either way. Ignored
-// rather than deleted or silently rewritten: the precedence logic they
-// exercise is still real and still needs coverage, but re-covering it
-// needs a real design decision (e.g. a bounded/--once run mode, or
-// swapping the live endpoint for a local mock server in the test) that is
-// out of Phase 3's stated scope (`src/main.rs` only) — flagged for the
-// packet author rather than guessed at here.
+// As of Phase 3 of specs/002-binance-feed, `main` connects to Binance and
+// loops forever reading the websocket — there is no bounded-run mode. That
+// rules out `Command::output()` (which waits for exit) as a way to observe
+// the config/CLI-precedence startup log line. Per revisions.md entry 4, the
+// fix is to spawn the child with piped stderr and read lines until the
+// `starting pair=... port=...` line appears, then kill the child — no mock
+// server and no bounded-run flag needed, because that line is written
+// before the connect attempt, so this works identically whether or not the
+// process can actually reach Binance.
+
+/// Spawns `BIN` with the given env vars and args, reads stderr lines (off a
+/// background thread, so a hang can't block the test forever) until one
+/// contains `needle` or `timeout` elapses, then kills the child. Returns the
+/// lines captured so far, panicking with them on timeout for a clear
+/// failure message.
+fn spawn_and_capture_stderr_until(
+    envs: &[(&str, &str)],
+    args: &[&str],
+    needle: &str,
+    timeout: Duration,
+) -> (Child, Vec<String>) {
+    let mut cmd = Command::new(BIN);
+    cmd.args(args).stderr(Stdio::piped()).stdout(Stdio::null());
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let mut child = cmd.spawn().expect("failed to spawn binary");
+    let stderr = child.stderr.take().expect("stderr was not piped");
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut captured = Vec::new();
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("timed out waiting for {needle:?} in stderr; captured so far: {captured:?}");
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(line) => {
+                let found = line.contains(needle);
+                captured.push(line);
+                if found {
+                    break;
+                }
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("timed out waiting for {needle:?} in stderr; captured so far: {captured:?}");
+            }
+        }
+    }
+    (child, captured)
+}
+
 #[test]
-#[ignore = "main() now runs forever against a live socket post-Phase-3; see comment above"]
 fn default_run_logs_defaults_with_empty_stdout() {
-    let out = Command::new(BIN).output().expect("failed to run binary");
-
-    assert!(out.status.success(), "exit status: {:?}", out.status);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("pair=ethbtc"), "stderr was: {stderr}");
-    assert!(stderr.contains("port=50051"), "stderr was: {stderr}");
-    assert!(
-        out.stdout.is_empty(),
-        "stdout was not empty: {:?}",
-        String::from_utf8_lossy(&out.stdout)
-    );
+    // stdout can't be asserted precisely here — unlike `Command::output()`,
+    // a still-running child has no captured stdout to inspect after the
+    // fact. The stdout/stderr split is still covered structurally: every
+    // assertion below reads exclusively from the stderr handle.
+    let (mut child, captured) =
+        spawn_and_capture_stderr_until(&[], &[], "port=50051", Duration::from_secs(5));
+    let joined = captured.join("\n");
+    assert!(joined.contains("pair=ethbtc"), "stderr was: {joined}");
+    assert!(joined.contains("port=50051"), "stderr was: {joined}");
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[test]
-#[ignore = "main() now runs forever against a live socket post-Phase-3; see comment above"]
 fn flags_override_defaults_with_no_env_vars() {
-    let out = Command::new(BIN)
-        .args(["--pair", "btcusd", "--port", "12345"])
-        .output()
-        .expect("failed to run binary");
-
-    assert!(out.status.success(), "exit status: {:?}", out.status);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("pair=btcusd"), "stderr was: {stderr}");
-    assert!(stderr.contains("port=12345"), "stderr was: {stderr}");
+    let (mut child, captured) = spawn_and_capture_stderr_until(
+        &[],
+        &["--pair", "btcusd", "--port", "12345"],
+        "port=12345",
+        Duration::from_secs(5),
+    );
+    let joined = captured.join("\n");
+    assert!(joined.contains("pair=btcusd"), "stderr was: {joined}");
+    assert!(joined.contains("port=12345"), "stderr was: {joined}");
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[test]
-#[ignore = "main() now runs forever against a live socket post-Phase-3; see comment above"]
 fn env_vars_override_defaults_with_no_flags() {
-    let out = Command::new(BIN)
-        .env("KEYROCK_PAIR", "btcusd")
-        .env("KEYROCK_PORT", "12345")
-        .output()
-        .expect("failed to run binary");
-
-    assert!(out.status.success(), "exit status: {:?}", out.status);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("pair=btcusd"), "stderr was: {stderr}");
-    assert!(stderr.contains("port=12345"), "stderr was: {stderr}");
+    let (mut child, captured) = spawn_and_capture_stderr_until(
+        &[("KEYROCK_PAIR", "btcusd"), ("KEYROCK_PORT", "12345")],
+        &[],
+        "port=12345",
+        Duration::from_secs(5),
+    );
+    let joined = captured.join("\n");
+    assert!(joined.contains("pair=btcusd"), "stderr was: {joined}");
+    assert!(joined.contains("port=12345"), "stderr was: {joined}");
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[test]
-#[ignore = "main() now runs forever against a live socket post-Phase-3; see comment above"]
 fn cli_flag_wins_over_env_var_for_port() {
     // The actual precedence regression test: KEYROCK_PORT and --port both
     // set, to different values — the flag must win.
-    let out = Command::new(BIN)
-        .env("KEYROCK_PORT", "1")
-        .args(["--port", "12345"])
-        .output()
-        .expect("failed to run binary");
-
-    assert!(out.status.success(), "exit status: {:?}", out.status);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("port=12345"), "stderr was: {stderr}");
-    assert!(!stderr.contains("port=1 "), "stderr was: {stderr}");
+    let (mut child, captured) = spawn_and_capture_stderr_until(
+        &[("KEYROCK_PORT", "1")],
+        &["--port", "12345"],
+        "port=12345",
+        Duration::from_secs(5),
+    );
+    let joined = captured.join("\n");
+    assert!(joined.contains("port=12345"), "stderr was: {joined}");
+    assert!(!joined.contains("port=1 "), "stderr was: {joined}");
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[test]
