@@ -84,6 +84,18 @@ hand.
 
 Logs go to stderr so stdout stays pipeable.
 
+## Price representation
+
+`Price`/`Amount` are thin newtypes over `f64` — chosen for type safety (the
+compiler rejects passing an `Amount` where a `Price` goes) and a
+well-defined total order (`Ord` via `f64::total_cmp`) for sorting, not for
+raw precision. Fixed-point was tried first and measured against two million
+realistic ETHBTC price pairs before being dropped as unneeded complexity at
+this scale (detail in `specs/002-binance-feed/revisions.md`). The one
+computed value, the combined-book spread (step 5), is rounded to 8 decimals
+at the gRPC boundary. A system whose arithmetic accumulates over many
+updates — unlike this one — would be right to reach for integers instead.
+
 ## Docker
 
 ```sh
