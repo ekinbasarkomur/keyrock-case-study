@@ -195,3 +195,41 @@ port 0, start the server on a task, connect a real `tonic` client, and take
 **two** messages off the stream before asserting — one only proves the call
 returned, two proves it's actually a stream, which is what the schema
 promises and what could actually break.
+
+## 4. Fixing the four ignored CLI tests: no mock server, no bounded-run flag
+
+**Supersedes:** Phase 3's temporary `#[ignore]` on
+`default_run_logs_defaults_with_empty_stdout`,
+`flags_override_defaults_with_no_env_vars`,
+`env_vars_override_defaults_with_no_flags`, and
+`cli_flag_wins_over_env_var_for_port` in `tests/cli.rs`, and the two
+follow-up options that were on the table (a local mock websocket server, or
+a bounded `--max-messages`/`--once` CLI flag).
+
+**What changed:** these four tests no longer wait for the process to exit.
+They spawn the real binary with piped stderr, read lines until the
+`starting pair=... port=...` line appears (or a short timeout elapses), then
+kill the child and assert on the captured line — the same real binary, the
+same real config/CLI-precedence code path, no network dependency either
+way, and no synthetic server standing in for Binance.
+
+**Why not a mock server:** the project's own testing convention (entry 3
+above) already prefers real code paths over mocks, and here it isn't even a
+tradeoff — the log line these tests assert on is written *before* the
+connect attempt, so the test never needs the network call to succeed (or
+even complete) to observe it. A mock server would add infrastructure to
+solve a problem that doesn't require it.
+
+**Why not a bounded-run flag:** adding a `--max-messages`/`--once` mode to
+`main` would be new production behavior justified only by test
+convenience — the kind of thing this project's spec discipline exists to
+prevent. Killing the child after the assertion is satisfied gets the same
+test coverage without touching `main.rs`'s design.
+
+**What this doesn't cover:** these four tests still can't observe anything
+past the `starting` line — they don't and can't prove the live Binance
+connection itself works (real-network reachability is proven separately, by
+the 25+ minute manual run and, for restricted networks, by the proxy path
+in entry 2). That boundary is deliberate, not a gap: CLI/config-precedence
+correctness and live-feed correctness are different claims, and this test
+file only ever made the first one.
