@@ -4,17 +4,23 @@
 //! worth testing belongs in the library crate (`src/lib.rs`), which the
 //! integration tests in `tests/` can actually reach.
 //!
-//! This step's read loop is driven directly here, in the `main` task — no
-//! `tokio::spawn`, no `.split()` on the websocket stream. A single feed, a
-//! single task, is the entire concurrency story until step 3/4 add a second
-//! venue (see `specs/002-binance-feed/spec.md`).
+//! Three tasks run concurrently from here: the Binance feed loop (unchanged
+//! in behavior from step 1, just moved into [`run_feed`] so it can be
+//! spawned), the fake-data writer (`server::run_fake_writer`), and the gRPC
+//! server (`server::router(rx).serve(addr)`). See the `select!` at the
+//! bottom of [`main`] for why all three are supervised together rather than
+//! run sequentially or fire-and-forgotten.
+
+use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures_util::StreamExt;
 use keyrock_case_study::exchange::binance;
 use keyrock_case_study::proxy::{self, parse_proxy_addr};
+use keyrock_case_study::server;
 use keyrock_case_study::{config::Config, telemetry};
+use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{client_async_tls, connect_async};
 use tracing::{debug, info, warn};
@@ -53,12 +59,72 @@ async fn main() -> Result<()> {
     // features alone — the process must install one before the first TLS
     // handshake, or `connect_async` panics deep inside rustls with an
     // unhelpful message. `tokio-tungstenite`'s `rustls-tls-webpki-roots`
-    // feature resolves `ring` as the provider; this just activates it.
+    // feature resolves `ring` as the provider; this just activates it. Must
+    // happen once, in `main`, before any task that might dial TLS is spawned.
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("no CryptoProvider installed yet — this is the first call");
 
-    let url = binance::connect_url(&config.pair);
+    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
+        .parse()
+        .with_context(|| format!("invalid bind address {}:{}", config.host, config.port))?;
+
+    // `None` until the fake writer's (and, from step 3 on, the real
+    // aggregator's) first tick — `server::router`'s stream filters that
+    // case out rather than publishing a fabricated empty `Summary`.
+    let (tx, rx) = watch::channel(None);
+
+    let pair = config.pair.clone();
+    let feed_handle = tokio::spawn(async move { run_feed(pair).await });
+    let fake_writer_handle = tokio::spawn(server::run_fake_writer(tx));
+    let server_handle = tokio::spawn(async move { server::router(rx).serve(addr).await });
+
+    // `select!` over all three `JoinHandle`s, not sequential `.await`s and
+    // not detached spawns with dropped handles:
+    //   - Sequential `.await`s would never reach the second/third handle
+    //     while the first is still running, so a dead gRPC server behind a
+    //     live feed (or vice versa) would go unnoticed indefinitely.
+    //   - Dropping the handles would detach the tasks; a panic in any one
+    //     of them would print nothing and `main` could still return exit 0
+    //     with nothing actually running.
+    // A server serving a dead feed publishes stale prices under a
+    // "still live" appearance, which is worse than the process not running
+    // at all — so the moment any one task ends, the whole process ends,
+    // propagating that task's error (or exiting cleanly if it ended without
+    // one).
+    tokio::select! {
+        res = feed_handle => match res {
+            Ok(Ok(())) => {
+                info!("feed task ended");
+                Ok(())
+            }
+            Ok(Err(e)) => Err(e).context("feed task failed"),
+            Err(e) => Err(e).context("feed task panicked"),
+        },
+        res = fake_writer_handle => match res {
+            Ok(()) => {
+                info!("fake writer task ended");
+                Ok(())
+            }
+            Err(e) => Err(e).context("fake writer task panicked"),
+        },
+        res = server_handle => match res {
+            Ok(Ok(())) => {
+                info!("server task ended");
+                Ok(())
+            }
+            Ok(Err(e)) => Err(e).context("server task failed"),
+            Err(e) => Err(e).context("server task panicked"),
+        },
+    }
+}
+
+/// The Binance feed loop — connect, read frames, log the top of book.
+/// Structurally identical to what step 1 ran directly in `main`'s own task;
+/// moved into its own function only so it can be `tokio::spawn`ed alongside
+/// the fake writer and the gRPC server.
+async fn run_feed(pair: String) -> Result<()> {
+    let url = binance::connect_url(&pair);
     let (mut ws, _response) = match proxy_addr() {
         Some((proxy_host, proxy_port)) => {
             info!(proxy = %format!("{proxy_host}:{proxy_port}"), "connecting to binance via HTTP CONNECT proxy");
@@ -76,10 +142,9 @@ async fn main() -> Result<()> {
     };
     info!(url = %url, "connected to binance");
 
-    // Single `next()` loop over the bidirectional stream — no `.split()`,
-    // no `tokio::spawn`. This step never writes anything itself beyond what
-    // `tokio-tungstenite` answers automatically (pongs), so one task reading
-    // is sufficient.
+    // Single `next()` loop over the bidirectional stream — no `.split()`.
+    // This step never writes anything itself beyond what `tokio-tungstenite`
+    // answers automatically (pongs), so one task reading is sufficient.
     while let Some(message) = ws.next().await {
         let message = message.context("websocket read failed")?;
         match message {
@@ -90,12 +155,7 @@ async fn main() -> Result<()> {
                 {
                     info!(
                         "binance {} | bid {} x {} | ask {} x {} | id {}",
-                        config.pair,
-                        bid_price,
-                        bid_amount,
-                        ask_price,
-                        ask_amount,
-                        book.last_update_id
+                        pair, bid_price, bid_amount, ask_price, ask_amount, book.last_update_id
                     );
                 }
             }
