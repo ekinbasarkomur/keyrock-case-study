@@ -2,7 +2,7 @@
 spec_name: "Step 3 — wire the real feed through to gRPC"
 spec_id: "005"
 spec_folder: "005-aggregator"
-status: "draft"
+status: "approved"
 created_at: "2026-08-23"
 updated_at: "2026-08-23"
 created_by: "spec-synthesizer"
@@ -50,8 +50,11 @@ clients. `run_fake_writer` is deleted.
 **IN:** `src/aggregator.rs` (new), `src/merge.rs` (new, `summarise()`),
 `src/exchange/binance.rs` (parser switches to borrowed deserialisation),
 `src/main.rs` (feed → mpsc, aggregator replaces the fake writer),
-`src/server.rs` (delete `run_fake_writer`, watch carries `Arc<Summary>`),
-tests, README.
+`src/server.rs` (delete `run_fake_writer`; watch carries `Arc<Summary>`, so
+the `filter_map` adapting the watch stream into the gRPC response stream
+changes too — this is where `Arc<Summary>` gets cloned out into an owned
+`Summary` for `tonic`, which is the actual point decision 5's "clone moves
+outside the lock" claim gets realised), tests, README.
 
 **OUT, with the step each lands in:**
 - Bitstamp feed — step 4
@@ -71,11 +74,10 @@ reasoning lives outside this repo; one line of why is recorded here.)
    exchange strictly needs, but it lands now so step 4's second venue is a
    cloned `Sender` and one new match arm, not a redesign. Channel is
    **bounded at 32** (`mpsc::channel(32)`) — not in the original brief, but
-   confirmed with the user during spec review: an unbounded channel
-   contradicts `.claude/rules/rust.md`'s "prefer bounded channels so
-   backpressure is visible" rule, and 32 gives the aggregator slack for a
-   brief lag (e.g. a slow subscriber wakeup) without hiding a genuinely stuck
-   consumer.
+   confirmed with the user during spec review: an unbounded channel hides
+   backpressure, and backpressure is the signal that's supposed to stay
+   visible. 32 gives the aggregator slack for a brief lag (e.g. a slow
+   subscriber wakeup) without hiding a genuinely stuck consumer.
 2. **Channel, not a shared mutex.** The aggregator owns its state as a local
    variable in its own task — no lock to hold across an `.await`, no lock to
    forget to take.
@@ -87,6 +89,16 @@ reasoning lives outside this repo; one line of why is recorded here.)
    allocations from ~107 to ~27 by not copying strings that are read once and
    dropped. If serde can't actually borrow (escapes forcing an owned
    `String`), report that rather than silently falling back to owned data.
+   **The borrow ends inside `parse()`:** `Depth20<'a>` is only valid for the
+   lifetime of the websocket message it borrows from, but `Book` outlives
+   that message — it goes down the `mpsc` and into the aggregator's state.
+   The chain is `message (String) → Depth20<'a> (borrowed) → Price/Amount
+   (f64, Copy, independent) → Book (owned, independent)`, and only then can
+   the message drop. `Book` must hold only owned or `Copy` data — nothing
+   borrowed — and it works today only because `Price`/`Amount` wrap `f64`
+   and are `Copy`. Write this down now: the next field added to `Book` (a
+   symbol, a venue string) will hit an inexplicable lifetime error without
+   this rule on record.
 5. **`watch` carries `Option<Arc<Summary>>`, not `Option<Summary>`.** The
    `watch`'s internal lock is held while a subscriber reads; cloning a
    `Summary` under that lock is ~22 allocations, `Arc::clone` is one atomic
@@ -140,6 +152,11 @@ testing convention — no test beyond this list:
 
 - `summarise`, a 20-level book → 10 bids, 10 asks, correct spread — catches
   a truncation or sort bug in the top-10 selection.
+- `summarise`, bids come back descending by price and asks ascending —
+  currently defensible without this test, since Binance already sends sorted
+  books and `summarise` only takes the first ten. Added now because step 5's
+  `merge()` does real ordering work; this is the test that catches a merge
+  that ruins it, not a bug summarise can introduce today.
 - `summarise`, a 6-level book → 6, not padded to 10 — catches accidental
   zero-padding of a short book.
 - `summarise(None)` → `None` — catches a panic or a synthesized-empty-book
