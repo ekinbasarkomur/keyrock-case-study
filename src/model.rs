@@ -29,7 +29,7 @@ pub struct Amount(f64);
 impl Price {
     /// Parses an exchange decimal string (e.g. `"0.03150000"`). Returns
     /// `None` if the string isn't a valid number.
-    pub fn from_str_price(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         s.parse::<f64>().ok().map(Self)
     }
 }
@@ -37,7 +37,7 @@ impl Price {
 impl Amount {
     /// Parses an exchange decimal string (e.g. `"5.00000000"`). Returns
     /// `None` if the string isn't a valid number.
-    pub fn from_str_price(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         s.parse::<f64>().ok().map(Self)
     }
 }
@@ -104,7 +104,7 @@ mod tests {
     /// decimal string.
     #[test]
     fn price_round_trips_through_display() {
-        let price = Price::from_str_price("0.03150000").expect("valid decimal string");
+        let price = Price::parse("0.03150000").expect("valid decimal string");
         assert_eq!(price.to_string(), "0.03150000");
     }
 
@@ -118,7 +118,7 @@ mod tests {
     fn prices_sort_ascending_by_value() {
         let mut prices: Vec<Price> = ["0.0320", "0.0100", "0.0315", "0.0001"]
             .iter()
-            .map(|s| Price::from_str_price(s).expect("valid decimal string"))
+            .map(|s| Price::parse(s).expect("valid decimal string"))
             .collect();
         prices.sort();
         let sorted: Vec<String> = prices.iter().map(Price::to_string).collect();
@@ -136,8 +136,8 @@ mod tests {
     /// violate the total order that sorting depends on.
     #[test]
     fn equal_prices_compare_equal() {
-        let a = Price::from_str_price("0.03150000").expect("valid decimal string");
-        let b = Price::from_str_price("0.03150000").expect("valid decimal string");
+        let a = Price::parse("0.03150000").expect("valid decimal string");
+        let b = Price::parse("0.03150000").expect("valid decimal string");
         assert_eq!(a.cmp(&b), Ordering::Equal);
         assert!(!(a < b));
         assert!(!(b < a));

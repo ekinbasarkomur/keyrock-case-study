@@ -66,8 +66,8 @@ fn parse_levels(levels: &[[String; 2]]) -> Option<Vec<(Price, crate::model::Amou
     levels
         .iter()
         .map(|[price, amount]| {
-            let price = Price::from_str_price(price)?;
-            let amount = crate::model::Amount::from_str_price(amount)?;
+            let price = Price::parse(price)?;
+            let amount = crate::model::Amount::parse(amount)?;
             Some((price, amount))
         })
         .collect()
@@ -100,31 +100,31 @@ mod tests {
         assert_eq!(book.last_update_id, 7_723_441);
 
         let (best_bid_price, best_bid_amount) = book.bids[0];
-        assert_eq!(best_bid_price, Price::from_str_price("0.03150000").unwrap());
+        assert_eq!(best_bid_price, Price::parse("0.03150000").unwrap());
         assert_eq!(
             best_bid_amount,
-            crate::model::Amount::from_str_price("1.00000000").unwrap()
+            crate::model::Amount::parse("1.00000000").unwrap()
         );
 
         let (best_ask_price, best_ask_amount) = book.asks[0];
-        assert_eq!(best_ask_price, Price::from_str_price("0.03151000").unwrap());
+        assert_eq!(best_ask_price, Price::parse("0.03151000").unwrap());
         assert_eq!(
             best_ask_amount,
-            crate::model::Amount::from_str_price("2.00000000").unwrap()
+            crate::model::Amount::parse("2.00000000").unwrap()
         );
 
         let (last_bid_price, last_bid_amount) = book.bids[19];
-        assert_eq!(last_bid_price, Price::from_str_price("0.03131000").unwrap());
+        assert_eq!(last_bid_price, Price::parse("0.03131000").unwrap());
         assert_eq!(
             last_bid_amount,
-            crate::model::Amount::from_str_price("5.75000000").unwrap()
+            crate::model::Amount::parse("5.75000000").unwrap()
         );
 
         let (last_ask_price, last_ask_amount) = book.asks[19];
-        assert_eq!(last_ask_price, Price::from_str_price("0.03170000").unwrap());
+        assert_eq!(last_ask_price, Price::parse("0.03170000").unwrap());
         assert_eq!(
             last_ask_amount,
-            crate::model::Amount::from_str_price("11.50000000").unwrap()
+            crate::model::Amount::parse("11.50000000").unwrap()
         );
     }
 
