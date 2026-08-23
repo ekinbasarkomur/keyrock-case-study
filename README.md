@@ -218,6 +218,19 @@ If you see the container start then stop, check whether your network can
 reach `stream.binance.com` directly, and if not, set `PROXY_HOST`/
 `PROXY_PORT` in `.env` (see Configuration above).
 
+## Deployment notes
+
+The service is a single stateless container — one process per pair, no
+persistent state — so it scales horizontally and restarts cleanly with no
+recovery step. The dev-time CONNECT proxy (see Configuration above) runs on
+a `t3.nano` Squid instance in `eu-central-1`, chosen for region proximity
+to Binance's endpoint rather than for capacity — it's forwarding one
+websocket. Any CONNECT proxy works, provided port 9443 is allowed through
+its `SSL_ports`/`Safe_ports` ACL. In a real deployment, egress would go
+through a NAT gateway or VPC endpoint rather than a standalone proxy
+instance, and the container would carry a real health check instead of
+relying on `select!`'s exit-on-failure as the only failure signal.
+
 ## What would change for production
 
 **Pair selection belongs on the request, not the process.** `BookSummary`
