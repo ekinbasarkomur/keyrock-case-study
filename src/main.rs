@@ -4,16 +4,18 @@
 //! worth testing belongs in the library crate (`src/lib.rs`), which the
 //! integration tests in `tests/` can actually reach.
 //!
-//! Three tasks run concurrently from here: the Binance feed
-//! (`feed::run_feed::<Binance>` — the generic driver loop shared by every
-//! `Exchange` implementation lives in `src/feed.rs`, not here; this file
-//! only constructs `Binance` and spawns it), the aggregator task
-//! (`aggregator::run`, step 3 — owns per-venue book state, calls
-//! `merge::summarise`, publishes into the watch channel), and the gRPC
-//! server (`server::router(rx).serve(addr)`). See the `select!` at the
-//! bottom of [`main`] for why all three are supervised together rather than
-//! run sequentially or fire-and-forgotten. Bitstamp isn't spawned yet — see
-//! `specs/006-bitstamp/plan.md` Phase 4.
+//! Four tasks run concurrently from here: the Binance and Bitstamp feeds
+//! (`feed::run_feed::<Binance>` and `feed::run_feed::<Bitstamp>` — the
+//! generic driver loop shared by every `Exchange` implementation lives in
+//! `src/feed.rs`, not here; this file only constructs each `Exchange` impl
+//! and spawns it, both sending into the same `mpsc::Sender`), the
+//! aggregator task (`aggregator::run`, step 3 — owns per-venue book state,
+//! calls `merge::summarise`, publishes into the watch channel), and the
+//! gRPC server (`server::router(rx).serve(addr)`). See the `select!` at the
+//! bottom of [`main`] for why all four are supervised together rather than
+//! run sequentially or fire-and-forgotten. gRPC output stays single-venue
+//! this step (`summarise` reads the map's lowest-ordered entry) — real
+//! two-book merging is step 5.
 
 use std::net::SocketAddr;
 
@@ -21,6 +23,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use keyrock_case_study::exchange::Venue;
 use keyrock_case_study::exchange::binance::Binance;
+use keyrock_case_study::exchange::bitstamp::Bitstamp;
 use keyrock_case_study::model::Book;
 use keyrock_case_study::{aggregator, feed, server};
 use keyrock_case_study::{config::Config, telemetry};
@@ -83,7 +86,10 @@ async fn main() -> Result<()> {
     let (feed_tx, feed_rx) = mpsc::channel::<(Venue, Book)>(32);
 
     let pair = config.pair.clone();
-    let feed_handle = tokio::spawn(feed::run_feed(Binance, pair, feed_tx));
+    let binance_tx = feed_tx.clone();
+    let bitstamp_tx = feed_tx;
+    let binance_handle = tokio::spawn(feed::run_feed(Binance, pair.clone(), binance_tx));
+    let bitstamp_handle = tokio::spawn(feed::run_feed(Bitstamp, pair, bitstamp_tx));
     let aggregator_handle = tokio::spawn(aggregator::run(feed_rx, tx));
     let server_handle = tokio::spawn(async move { server::router(rx).serve(addr).await });
 
@@ -101,13 +107,21 @@ async fn main() -> Result<()> {
     // propagating that task's error (or exiting cleanly if it ended without
     // one).
     tokio::select! {
-        res = feed_handle => match res {
+        res = binance_handle => match res {
             Ok(Ok(())) => {
-                info!("feed task ended");
+                info!("binance feed task ended");
                 Ok(())
             }
-            Ok(Err(e)) => Err(e).context("feed task failed"),
-            Err(e) => Err(e).context("feed task panicked"),
+            Ok(Err(e)) => Err(e).context("binance feed task failed"),
+            Err(e) => Err(e).context("binance feed task panicked"),
+        },
+        res = bitstamp_handle => match res {
+            Ok(Ok(())) => {
+                info!("bitstamp feed task ended");
+                Ok(())
+            }
+            Ok(Err(e)) => Err(e).context("bitstamp feed task failed"),
+            Err(e) => Err(e).context("bitstamp feed task panicked"),
         },
         res = aggregator_handle => match res {
             Ok(()) => {
