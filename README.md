@@ -81,7 +81,8 @@ production should ship without a toggle.
   at 8 decimals (`specs/002-binance-feed/revisions.md` entry 1). Kept: the
   newtype boundary and a total order (`Ord` via `total_cmp`). Dropped: the
   integer domain. The one computed (not passed-through) value, the spread,
-  is rounded to that same 8-decimal tick at the boundary — see "production."
+  is rounded to that same 8-decimal tick at the boundary — a hardcoded
+  assumption, not derived per pair.
 - **One `Exchange` trait, kept synchronous** — introduced in step 4 once
   there were two implementations to abstract over. `async fn` in a trait
   can't be used behind `dyn Trait` anyway, and every call site is a concrete
@@ -93,7 +94,8 @@ production should ship without a toggle.
   clamped. One exchange's own matching engine can't cross a trade, but two
   independently-matched venues routinely can; that's a real (if fleeting)
   arbitrage signal worth reporting honestly.
-- **One process per pair** — `BookSummary` takes `Empty`. See "production."
+- **One process per pair** — `BookSummary` takes `Empty`, so a second pair
+  means a second process.
 
 ## Layout
 
@@ -169,26 +171,3 @@ serving stale data. Development here runs through a CONNECT proxy (Binance
 is unreachable from the author's network); set `PROXY_HOST`/`PROXY_PORT` in
 `.env` if yours needs one too.
 
-## What would change for production
-
-**Pair selection belongs on the request, not the process.** `BookSummary`
-takes `Empty`, so a second pair means a second process — doesn't scale by
-multiplexing (Binance alone allows 1024 streams per connection). Noted here
-rather than edited into `proto/orderbook.proto`, since the schema is fixed
-per the brief.
-
-**Reflection would be gated** behind a config toggle, and the container
-would carry a real health check rather than `select!`'s exit-on-failure as
-the only signal.
-
-**`merge()` returns the proto `Summary`/`Level` types directly**, with no
-internal `MergedBook` decoupling them from the wire format — indirection
-without payoff at one consumer, worth revisiting with a second one.
-
-**The spread is rounded to a hardcoded 8-decimal tick**, same assumption as
-`Price`/`Amount` above, not derived per pair. The correct fix is the same in
-both places: per-pair tick size from each exchange's `exchangeInfo`.
-
-**Every `Level.exchange` is a fresh `String`** — twenty allocations per
-published message, forced by the proto schema. Known and accepted, not
-optimized away; would matter if allocation showed up in profiling.
