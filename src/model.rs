@@ -107,4 +107,39 @@ mod tests {
         let price = Price::from_str_price("0.03150000").expect("valid decimal string");
         assert_eq!(price.to_string(), "0.03150000");
     }
+
+    /// A `Vec<Price>` built from out-of-order strings sorts ascending by
+    /// value under `.sort()`. Catches a flipped comparator (e.g.
+    /// `other.cmp(self)`) or a `PartialOrd`/`Ord` impl that silently
+    /// disagrees with each other — either would sort the wrong direction
+    /// or panic, and step 5's `merge()` sorts bids/asks entirely by this
+    /// `Ord` impl.
+    #[test]
+    fn prices_sort_ascending_by_value() {
+        let mut prices: Vec<Price> = ["0.0320", "0.0100", "0.0315", "0.0001"]
+            .iter()
+            .map(|s| Price::from_str_price(s).expect("valid decimal string"))
+            .collect();
+        prices.sort();
+        let sorted: Vec<String> = prices.iter().map(Price::to_string).collect();
+        assert_eq!(
+            sorted,
+            vec!["0.00010000", "0.01000000", "0.03150000", "0.03200000"]
+        );
+    }
+
+    /// Two `Price`s parsed from the same string compare `Ordering::Equal`,
+    /// and neither is less than the other. Catches a `total_cmp` misuse
+    /// that breaks reflexivity for equal values — `total_cmp` exists
+    /// precisely to give a well-defined order even where `PartialOrd`
+    /// wouldn't (NaN, signed zero), and a broken impl here would silently
+    /// violate the total order that sorting depends on.
+    #[test]
+    fn equal_prices_compare_equal() {
+        let a = Price::from_str_price("0.03150000").expect("valid decimal string");
+        let b = Price::from_str_price("0.03150000").expect("valid decimal string");
+        assert_eq!(a.cmp(&b), Ordering::Equal);
+        assert!(!(a < b));
+        assert!(!(b < a));
+    }
 }
