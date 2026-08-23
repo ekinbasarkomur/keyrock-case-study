@@ -292,8 +292,12 @@ step 6 with the rest of the aggregator work. This step proceeds with
 - All eight tests above pass.
 - `merge` stays pure — no network, no clock, no channels.
 - `Side` is an enum; no bool parameter anywhere in the merge path.
-- **Scope check:** `git diff main --stat` shows `src/aggregator.rs`
-  unchanged.
+- **Scope check:** `git diff main --stat -- src/aggregator.rs` shows no
+  logic change. The rename `summarise()` → `merge()` forces a one-line
+  call-site edit and two doc-comment references there — that mechanical
+  edit is not a scope violation (no wrapper function; matches step 4's
+  Job A precedent: "call sites may change, no assertion may change").
+  Nothing else in `src/aggregator.rs` may change.
 - **README commit sequencing:** the README cut-down lands as its own
   commit, under 1,200 words, before the merge-algorithm commit.
 - `cargo build`, `cargo test`, `cargo clippy --all-targets -- -D warnings`,
