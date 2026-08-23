@@ -161,7 +161,9 @@ directly — useful on networks that can't reach `stream.binance.com`
 directly. Unset, behavior is unchanged. `compose.yml` builds this from
 `PROXY_HOST`/`PROXY_PORT` in `.env` (see `.env.example`); a malformed proxy
 value falls back to a direct connection with a warning rather than failing
-to start.
+to start. The proxy used during this project's own development is a small
+Squid instance on a `t3.nano` EC2 host in `eu-central-1` — any HTTP `CONNECT`
+proxy with port 9443 allowed through its `SSL_ports`/`Safe_ports` ACL works.
 
 **Verified live** (2026-08-23, via the proxy path above): the connection
 held for 27 minutes straight against Binance's 20s ping / 60s pong-timeout —
