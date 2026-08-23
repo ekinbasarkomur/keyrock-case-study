@@ -8,19 +8,25 @@ use std::fmt;
 use crate::model::Book;
 
 pub mod binance;
+pub mod bitstamp;
 
 /// Which venue a `Book` (or a published `Level`) came from. An enum, not a
-/// string, so adding Bitstamp later makes every place that needs updating
-/// fail to compile instead of silently doing nothing.
+/// string, so adding another venue makes every place that needs updating
+/// fail to compile instead of silently doing nothing. `Binance` must stay
+/// the first variant — `BTreeMap<Venue, _>` iteration order (and this
+/// step's "first entry wins" `summarise` selection) depends on declaration
+/// order, not insertion order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Venue {
     Binance,
+    Bitstamp,
 }
 
 impl fmt::Display for Venue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Venue::Binance => write!(f, "binance"),
+            Venue::Bitstamp => write!(f, "bitstamp"),
         }
     }
 }
