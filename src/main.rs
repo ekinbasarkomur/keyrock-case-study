@@ -111,6 +111,11 @@ async fn main() -> Result<()> {
             Message::Binary(_) => {
                 debug!("ignoring unexpected binary message");
             }
+            // Structurally required for the match to be exhaustive —
+            // `tungstenite::Message` has no `#[non_exhaustive]`, even though
+            // `.next()` on a client-API stream never actually produces this
+            // variant (it's only reachable via the raw-frame API this code
+            // doesn't use).
             Message::Frame(_) => {
                 debug!("ignoring raw frame message");
             }
