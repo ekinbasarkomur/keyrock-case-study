@@ -122,9 +122,12 @@ pub async fn run_fake_writer(tx: watch::Sender<Option<Summary>>) {
                 amount: 1.0 + (i as f64) * 0.1,
             })
             .collect();
-        // Best bid 0.0315, best ask 0.0316 — matches the fixed spacing
-        // above exactly, rather than recomputing it from the vectors.
-        let spread = 0.0316 - 0.0315;
+        // Derived from the vectors, not restated as a literal — changing the
+        // base prices above and forgetting to update a hardcoded spread
+        // would silently produce internally-inconsistent data that nothing
+        // catches (the test only asserts `spread > 0.0`, which would still
+        // hold). `asks[0]`/`bids[0]` are the best ask/bid by construction.
+        let spread = asks[0].price - bids[0].price;
 
         let summary = Summary { spread, bids, asks };
 
