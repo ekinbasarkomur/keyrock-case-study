@@ -63,3 +63,15 @@ times out — verified 2026-08-23, same result as the prior finding recorded
 in `specs/002-binance-feed/revisions.md` entry 2). `DEPTH20_FIXTURE` is
 still synthetic data; a real capture has not been substituted. The `TODO`
 comment names this explicitly rather than claiming it's resolved.
+
+**Gap closed (2026-08-23, same day):** a real `depth20` message was
+captured from `wss://stream.binance.com:9443/ws/ethbtc@depth20@100ms`
+through the project's own HTTP CONNECT proxy support (the gap above was
+about the sandbox's direct network access, not this project's proxy path).
+`DEPTH20_FIXTURE` in `src/exchange/binance.rs` now holds that real payload
+(`lastUpdateId: 9118724657`) instead of the synthetic one, the doc comment
+records the capture source and date in place of the `TODO`, and the test's
+specific value assertions (first/last bid, first/last ask) were updated to
+match the real values. The fixture's earlier synthetic pattern (exact
+`0.00001` price steps, exact `0.25` amount steps) is gone; real amounts are
+irregular, as expected.

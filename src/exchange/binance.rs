@@ -77,19 +77,9 @@ fn parse_levels(levels: &[[String; 2]]) -> Option<Vec<(Price, crate::model::Amou
 mod tests {
     use super::*;
 
-    /// Synthetic `depth20` payload — NOT a real capture. The bids step down
-    /// in exact `0.00001` increments with amounts in exact `0.25`
-    /// increments, which no real order book looks like; this fixture only
-    /// exercises the JSON shape, not real Binance data.
-    ///
-    /// TODO(project owner): replace with a real captured
-    /// `wss://stream.binance.com:9443/ws/ethbtc@depth20@100ms` payload —
-    /// this sandbox has no live network access to capture one (verified:
-    /// `curl` to `stream.binance.com:9443` times out). Capture with
-    /// `wscat -c wss://stream.binance.com:9443/ws/ethbtc@depth20@100ms`
-    /// (or equivalent) from a network that can reach Binance, then update
-    /// this comment to record where/when it was captured.
-    const DEPTH20_FIXTURE: &str = r#"{"lastUpdateId": 7723441, "bids": [["0.03150000", "1.00000000"], ["0.03149000", "1.25000000"], ["0.03148000", "1.50000000"], ["0.03147000", "1.75000000"], ["0.03146000", "2.00000000"], ["0.03145000", "2.25000000"], ["0.03144000", "2.50000000"], ["0.03143000", "2.75000000"], ["0.03142000", "3.00000000"], ["0.03141000", "3.25000000"], ["0.03140000", "3.50000000"], ["0.03139000", "3.75000000"], ["0.03138000", "4.00000000"], ["0.03137000", "4.25000000"], ["0.03136000", "4.50000000"], ["0.03135000", "4.75000000"], ["0.03134000", "5.00000000"], ["0.03133000", "5.25000000"], ["0.03132000", "5.50000000"], ["0.03131000", "5.75000000"]], "asks": [["0.03151000", "2.00000000"], ["0.03152000", "2.50000000"], ["0.03153000", "3.00000000"], ["0.03154000", "3.50000000"], ["0.03155000", "4.00000000"], ["0.03156000", "4.50000000"], ["0.03157000", "5.00000000"], ["0.03158000", "5.50000000"], ["0.03159000", "6.00000000"], ["0.03160000", "6.50000000"], ["0.03161000", "7.00000000"], ["0.03162000", "7.50000000"], ["0.03163000", "8.00000000"], ["0.03164000", "8.50000000"], ["0.03165000", "9.00000000"], ["0.03166000", "9.50000000"], ["0.03167000", "10.00000000"], ["0.03168000", "10.50000000"], ["0.03169000", "11.00000000"], ["0.03170000", "11.50000000"]]}"#;
+    // Captured from wss://stream.binance.com:9443/ws/ethbtc@depth20@100ms
+    // on 2026-08-23, via the project's own HTTP CONNECT proxy support.
+    const DEPTH20_FIXTURE: &str = r#"{"lastUpdateId":9118724657,"bids":[["0.03144000","36.35500000"],["0.03143000","59.83450000"],["0.03142000","141.81680000"],["0.03141000","106.58830000"],["0.03140000","114.49470000"],["0.03139000","96.53310000"],["0.03138000","86.20680000"],["0.03137000","126.79540000"],["0.03136000","128.94000000"],["0.03135000","135.11290000"],["0.03134000","130.71860000"],["0.03133000","127.34300000"],["0.03132000","3.88700000"],["0.03131000","4.52020000"],["0.03130000","4.02660000"],["0.03129000","3.94970000"],["0.03128000","19.31970000"],["0.03127000","4.04340000"],["0.03126000","3.56970000"],["0.03125000","4.47450000"]],"asks":[["0.03145000","37.64560000"],["0.03146000","36.96670000"],["0.03147000","34.83630000"],["0.03148000","68.41130000"],["0.03149000","163.81090000"],["0.03150000","138.90970000"],["0.03151000","119.96530000"],["0.03152000","113.25420000"],["0.03153000","95.42750000"],["0.03154000","86.32880000"],["0.03155000","83.70930000"],["0.03156000","122.40940000"],["0.03157000","0.35420000"],["0.03158000","0.40210000"],["0.03159000","0.81870000"],["0.03160000","0.37230000"],["0.03161000","0.77060000"],["0.03162000","0.82900000"],["0.03163000","17.03620000"],["0.03164000","0.82870000"]]}"#;
 
     #[test]
     fn parses_depth20_into_twenty_bids_and_twenty_asks_with_correct_values() {
@@ -97,34 +87,34 @@ mod tests {
 
         assert_eq!(book.bids.len(), 20);
         assert_eq!(book.asks.len(), 20);
-        assert_eq!(book.last_update_id, 7_723_441);
+        assert_eq!(book.last_update_id, 9_118_724_657);
 
         let (best_bid_price, best_bid_amount) = book.bids[0];
-        assert_eq!(best_bid_price, Price::parse("0.03150000").unwrap());
+        assert_eq!(best_bid_price, Price::parse("0.03144000").unwrap());
         assert_eq!(
             best_bid_amount,
-            crate::model::Amount::parse("1.00000000").unwrap()
+            crate::model::Amount::parse("36.35500000").unwrap()
         );
 
         let (best_ask_price, best_ask_amount) = book.asks[0];
-        assert_eq!(best_ask_price, Price::parse("0.03151000").unwrap());
+        assert_eq!(best_ask_price, Price::parse("0.03145000").unwrap());
         assert_eq!(
             best_ask_amount,
-            crate::model::Amount::parse("2.00000000").unwrap()
+            crate::model::Amount::parse("37.64560000").unwrap()
         );
 
         let (last_bid_price, last_bid_amount) = book.bids[19];
-        assert_eq!(last_bid_price, Price::parse("0.03131000").unwrap());
+        assert_eq!(last_bid_price, Price::parse("0.03125000").unwrap());
         assert_eq!(
             last_bid_amount,
-            crate::model::Amount::parse("5.75000000").unwrap()
+            crate::model::Amount::parse("4.47450000").unwrap()
         );
 
         let (last_ask_price, last_ask_amount) = book.asks[19];
-        assert_eq!(last_ask_price, Price::parse("0.03170000").unwrap());
+        assert_eq!(last_ask_price, Price::parse("0.03164000").unwrap());
         assert_eq!(
             last_ask_amount,
-            crate::model::Amount::parse("11.50000000").unwrap()
+            crate::model::Amount::parse("0.82870000").unwrap()
         );
     }
 
