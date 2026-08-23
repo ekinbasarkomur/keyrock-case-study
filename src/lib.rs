@@ -9,6 +9,7 @@
 //! moment the test suite grows past one file.
 
 pub mod config;
+pub mod exchange;
 pub mod model;
 pub mod telemetry;
 
