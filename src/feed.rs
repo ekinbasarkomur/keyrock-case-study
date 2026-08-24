@@ -73,7 +73,12 @@ pub async fn run_feed<E: Exchange>(
                     if let (Some((bid_price, bid_amount)), Some((ask_price, ask_amount))) =
                         (book.bids.first(), book.asks.first())
                     {
-                        info!(
+                        // debug, not info: Binance alone pushes ~10/s, and this
+                        // is per-tick diagnostic detail, not a state-change
+                        // event — at info it floods `docker compose up`'s
+                        // interleaved stdout and corrupts the client's
+                        // in-place redraw. `RUST_LOG=debug` still shows it.
+                        debug!(
                             "{} {} | bid {} x {} | ask {} x {} | id {}",
                             exchange.venue(),
                             pair,

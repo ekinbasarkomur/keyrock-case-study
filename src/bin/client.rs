@@ -123,16 +123,29 @@ async fn connect_and_stream(addr: &str, colour: bool, stats: &mut Stats) -> Resu
     Ok(())
 }
 
-/// Builds one full frame as a string: cursor home once, then one line per
-/// row with a trailing clear-to-end-of-line — never a full-screen clear
-/// (`\x1b[2J`), which would flicker at update rates this fast.
+/// Table interior width in visible columns. `row()` pads every row to
+/// exactly this width, which is also what lets the redraw skip a
+/// clear-to-end-of-line: every frame writes the same total width, so
+/// there's nothing left over from a longer previous frame to clear.
 ///
-/// `colour` gates every escape code, not just the colour ones — cursor-home
-/// and clear-to-end-of-line are meaningless (and would just be visible
-/// garbage) once stdout isn't a terminal, so a redirected run degrades to a
-/// plain scrolling dump, one frame per line block, with no `\x1b[` sequence
-/// anywhere in the file. That's what makes "pipe stdout to a file and see
-/// clean text" true, not only true for colour specifically.
+/// Total printed row width is `TABLE_WIDTH + 4` (borders + padding) = 76,
+/// a few columns under the 80-column terminal a `docker compose up`-style
+/// viewer typically assumes — deliberate margin, not 80 exactly, since an
+/// exact-width line's wrap behaviour at the last column is inconsistent
+/// across terminals, and `docker compose`'s own `"servicename | "` log
+/// prefix already eats into the same budget when this isn't viewed with
+/// `--no-log-prefix` (see `compose.yml`'s comment on the `client` service).
+const TABLE_WIDTH: usize = 72;
+
+/// Builds one full frame as a boxed table: cursor home once, then borders
+/// and fixed-width rows — never a full-screen clear (`\x1b[2J`), which would
+/// flicker at update rates this fast.
+///
+/// `colour` gates the cursor-home escape and the cell colour codes; the
+/// box-drawing border characters are plain text either way, so a redirected
+/// run still gets a readable framed table, just with no `\x1b[` sequence
+/// anywhere in it — that's what makes "pipe stdout to a file and see clean
+/// text" true.
 ///
 /// Takes `venues` as a slice rather than baking a fixed header string in,
 /// so step 7 can extend the header with per-venue status without changing
@@ -144,33 +157,77 @@ fn render(venues: &[Venue], summary: &Summary, stats: &Stats, colour: bool) -> S
     }
 
     let venue_names: Vec<String> = venues.iter().map(Venue::to_string).collect();
-    push_line(
+
+    border(&mut out, '┌', '┐');
+    row(
         &mut out,
-        &format!("  {:<50}{:>10}", venue_names.join(" + "), now_hms()),
-        colour,
+        &format!("{:<56}{:>16}", venue_names.join(" + "), now_hms()),
     );
-    push_line(&mut out, "", colour);
-    push_line(
-        &mut out,
-        &format!("  {:^35}  {:^35}", "BIDS", "ASKS"),
-        colour,
-    );
+    border(&mut out, '├', '┤');
+    row(&mut out, &format!("{:^35} {:^35}", "BIDS", "ASKS"));
+    border(&mut out, '├', '┤');
 
     for i in 0..ROWS {
         let bid = summary.bids.get(i);
         let ask = summary.asks.get(i);
-        let row = format!(
-            "  {}  {}",
-            level_cell(bid, colour, "\x1b[32m"),
-            level_cell(ask, colour, "\x1b[31m")
+        row(
+            &mut out,
+            &format!(
+                "{} {}",
+                level_cell(bid, colour, "\x1b[32m"),
+                level_cell(ask, colour, "\x1b[31m")
+            ),
         );
-        push_line(&mut out, &row, colour);
     }
 
-    push_line(&mut out, "", colour);
-    push_line(&mut out, &spread_line(summary, stats, colour), colour);
+    border(&mut out, '├', '┤');
+    row(&mut out, &spread_line(summary, stats, colour));
+    border(&mut out, '└', '┘');
 
     out
+}
+
+/// Draws one border line, `TABLE_WIDTH + 2` dashes wide so it matches
+/// `row`'s `"│ content │"` width exactly.
+fn border(out: &mut String, left: char, right: char) {
+    out.push(left);
+    out.push_str(&"─".repeat(TABLE_WIDTH + 2));
+    out.push(right);
+    out.push('\n');
+}
+
+/// Wraps one row of content in the table's side borders, padded to
+/// `TABLE_WIDTH` on *visible* width — `visible_len` skips any ANSI colour
+/// codes already embedded in `content`, so a coloured cell doesn't throw off
+/// border alignment the way naive `str::len` padding would.
+fn row(out: &mut String, content: &str) {
+    let pad = TABLE_WIDTH.saturating_sub(visible_len(content));
+    out.push_str("│ ");
+    out.push_str(content);
+    out.push_str(&" ".repeat(pad));
+    out.push_str(" │\n");
+}
+
+/// Visible character count, skipping `\x1b[...<letter>`-style ANSI escape
+/// sequences — needed so `row`'s padding lines up borders even when
+/// `content` has colour codes embedded in it.
+fn visible_len(s: &str) -> usize {
+    let mut len = 0;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            len += 1;
+        }
+    }
+    len
 }
 
 /// One bid or ask cell: price, amount, venue label. `None` renders as
@@ -207,11 +264,15 @@ fn spread_line(summary: &Summary, stats: &Stats, colour: bool) -> String {
         _ => "n/a".to_string(),
     };
 
-    let spread_text = format!("spread {:>12.8} ({bps})", summary.spread);
-    let spread_text = if summary.spread < 0.0 {
-        colourize(&spread_text, "\x1b[1;31m", colour)
+    // Padded to a fixed width *before* colourizing — `colourize` only wraps
+    // the string in escape codes, so padding first keeps this field's
+    // visible width constant regardless of colour, which is what lets
+    // `row()`'s single trailing pad still land the right border in place.
+    let spread_field = format!("{:<40}", format!("spread {:>12.8} ({bps})", summary.spread));
+    let spread_field = if summary.spread < 0.0 {
+        colourize(&spread_field, "\x1b[1;31m", colour)
     } else {
-        spread_text
+        spread_field
     };
 
     // `stats.rate` is always finite by construction (`Stats::record` only
@@ -224,10 +285,7 @@ fn spread_line(summary: &Summary, stats: &Stats, colour: bool) -> String {
         "-.-/s".to_string()
     };
 
-    format!(
-        "  {:<45}{:>10} updates   {rate_text}",
-        spread_text, stats.count
-    )
+    format!("{spread_field}{:>8} updates   {rate_text:<8}", stats.count)
 }
 
 /// Wall-clock `HH:MM:SS`, UTC. Good enough for a demo timestamp — pulling in
@@ -252,17 +310,4 @@ fn colourize(text: &str, code: &str, colour: bool) -> String {
     } else {
         text.to_string()
     }
-}
-
-/// Appends one line. When `colour` (this binary's stand-in for "stdout is a
-/// terminal") is set, follows it with `\x1b[K` (clear-to-end-of-line) —
-/// clears leftover characters from a longer previous frame without ever
-/// clearing the whole screen. When it isn't, appends a plain newline only,
-/// so redirected output has no escape codes at all.
-fn push_line(out: &mut String, line: &str, colour: bool) {
-    out.push_str(line);
-    if colour {
-        out.push_str("\x1b[K");
-    }
-    out.push('\n');
 }

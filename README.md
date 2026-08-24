@@ -10,9 +10,8 @@ market data into one aggregator task, which drives a real two-venue
 `merge()` and publishes into a `watch` channel that `src/server.rs` streams
 to gRPC clients on every change. **The gRPC output is a genuine combined
 book** — top 10 bids and asks across both venues, sorted and tie-broken.
-`docker compose up` also brings up a terminal client that renders that
-stream live (see [Client](#client)). No reconnection/staleness handling
-yet — that's step 7.
+A terminal client (`cargo run --bin client`) renders that stream live (see
+[Client](#client)). No reconnection/staleness handling yet — that's step 7.
 
 ## Build order
 
@@ -24,7 +23,7 @@ yet — that's step 7.
 | 3 | Wire step 1 into step 2 — first real end-to-end milestone | Done |
 | 4 | Add the Bitstamp feed | Done |
 | 5 | Real `merge()` + top-10 + spread — the core deliverable | Done |
-| 6 | The example client (`src/bin/client.rs`, `compose.yml`) | Done |
+| 6 | The example client (`src/bin/client.rs`) | Done |
 | 7 | Reconnection + staleness handling | Not started |
 | 8 | Remaining edge cases / tests | Not started |
 | 9 | Latency measurement (p50/p99), written up here | Not started |
@@ -44,7 +43,7 @@ signature change.
 ## Quick start
 
 ```sh
-docker compose up --build               # server + demo client, containerised, zero setup
+docker compose up --build               # server, containerised, zero setup
 cargo run --bin keyrock-case-study --   # defaults: --pair ethbtc --port 50051
 cargo run --bin keyrock-case-study -- --pair btcusd --port 12345
 ```
@@ -76,10 +75,16 @@ production should ship without a toggle.
 ## Client
 
 `src/bin/client.rs` is a demonstration terminal viewer, not part of the
-service — a second binary in the same image that streams `BookSummary` and
-redraws the combined book in place (colourised when stdout is a terminal).
-See it with `docker compose up`, or directly:
-`cargo run --bin client -- --addr http://127.0.0.1:50051`.
+service — a second binary that streams `BookSummary` and redraws the
+combined book in place (colourised when stdout is a terminal). It's not a
+`compose.yml` service: its cursor-addressed redraw needs a real terminal, and
+`docker compose up`'s combined, line-prefixed output isn't one. Run the
+server via compose and the client on the host, against the port it publishes:
+
+```sh
+docker compose up -d app
+cargo run --bin client -- --addr http://127.0.0.1:50051
+```
 
 ## Design decisions
 
@@ -172,17 +177,14 @@ cargo fmt --check
 ## Docker
 
 ```sh
-docker compose up --build               # app (gRPC on 127.0.0.1:50051) + client, both stay running
+docker compose up --build               # app, gRPC on 127.0.0.1:50051
 docker compose run --rm app --pair btcusd --port 12345
 ```
 
-Two services, one image: `app` (the server) and `client` (the demo viewer,
-sharing `app`'s image via `image:` rather than rebuilding). `tty: true` alone
-is enough for `client`'s ANSI escape codes to render in `docker compose up`'s
-log output — confirmed by running it, `stdin_open: true` wasn't needed. If
-`app` exits (no route to Binance, no proxy configured), `client` stays up
-retrying every second — its own reconnect loop working as designed, not a
-bug, though the logs then read as if `client` is the noisy one.
+One service, `app`. The demo client is deliberately not a `compose.yml`
+service — see [Client](#client) for why (cursor-addressed redraw and
+compose's line-prefixed combined output don't mix) and how to run it
+alongside `app`.
 
 Two-stage build (`rust:1.97-slim-bookworm` → `debian:bookworm-slim`
 non-root), no `ca-certificates` needed (`rustls-tls-webpki-roots` bundles its

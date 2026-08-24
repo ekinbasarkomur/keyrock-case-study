@@ -49,23 +49,12 @@ services:
     # the container exits shortly after starting — the three-task select!
     # in main.rs ends the whole process the instant the feed task ends.
 
-  # Demonstration client, not part of the service. Shares the image `app`
-  # builds (`image:`, not `build:`) rather than rebuilding it, and overrides
-  # only this service's entrypoint/command — `app`'s own ENTRYPOINT stays
-  # ["keyrock-case-study"] so `docker compose run --rm app --pair btcusd`
-  # keeps passing args straight through to the server binary.
-  client:
-    image: keyrock-case-study:local
-    entrypoint: ["client"]
-    command: ["--addr", "http://app:50051"]
-    depends_on: [app]
-    # Renders ANSI escape codes (cursor-home, colour) — needs a tty to
-    # render correctly rather than print raw escape sequences.
-    tty: true
-
-    # Expected, not a defect: if `app` exits (no route to Binance, no proxy
-    # configured — see the comment on `app` above), this service stays up,
-    # retrying its connection every second. That's the fixed reconnect loop
-    # in src/bin/client.rs working as designed, not a bug — but it means the
-    # logs will read as if the client is the noisy one while `app` is
-    # actually the side that died.
+# The demo client (src/bin/client.rs) isn't a compose service. Its
+# cursor-addressed redraw needs exclusive control of a real terminal;
+# `docker compose up`'s combined view prefixes every line with
+# "servicename | ", which pushes lines past 80 columns and wraps them,
+# tearing the redraw apart. Run it on the host instead, against the port
+# `app` publishes above:
+#
+#     docker compose up -d app
+#     cargo run --bin client -- --addr http://127.0.0.1:50051
