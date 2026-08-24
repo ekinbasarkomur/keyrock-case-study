@@ -59,9 +59,13 @@ signal to act on. See "What's dropped, and why" below.
 **OUT — and this is load-bearing:**
 - **`src/merge.rs` must not change.** Staleness decides which venues' books
   get handed to `merge()`; `merge()` itself never sees a clock, and this is
-  the step that would break that separation if anything did. This has been
-  the rule since step 3 (see the project's build-order history in
-  `CLAUDE.md`). The scope check for this whole packet is
+  the step that would break that separation if anything did — `merge()` has
+  been a pure function since it was first introduced (no clock, no I/O, no
+  channel reference) specifically so it stays unit-testable against
+  hand-built fixtures. This step is where that separation is under the most
+  pressure, since staleness is itself a time-based decision, which is
+  exactly why it stays a pre-filter on the map handed to `merge()` rather
+  than logic inside it. The scope check for this whole packet is
   `git diff main --stat -- src/merge.rs` showing no diff.
 - Latency instrumentation (step 8) — not built here.
 - Graceful shutdown on `SIGTERM` — not built here; the spec should note
@@ -288,11 +292,39 @@ for it.
 be touched — see Invariants), so the client infers venue health from which
 venues actually appear in the streamed levels, rather than from an explicit
 signal. This is a deliberately crude inference that avoids touching the
-wire schema. Note in the README's production section that a real system
-would carry venue health on the wire rather than leaving the client to
-infer it. The header already takes a venue list rather than a fixed string
-— that shape was set up in step 6 specifically for this piece, so this
-should be filling in a field rather than restructuring the header.
+wire schema. The header already takes a venue list rather than a fixed
+string — that shape was set up in step 6 specifically for this piece, so
+this should be filling in a field rather than restructuring the header.
+
+**Where "stale 4.2s" comes from — this must be stated explicitly, not left
+implicit.** Presence/absence in the streamed levels only tells the client a
+venue is currently missing; it gives no duration. The client must keep its
+own per-venue last-seen timestamp — updated whenever a frame contains at
+least one level from that venue — and compute the displayed duration from
+that, client-side, on every redraw.
+
+Two consequences of this, both worth writing into the README rather than
+leaving implicit:
+
+- **The client's timer is not the server's staleness state — they measure
+  different things.** The server's threshold (piece 5, 8s for Bitstamp)
+  starts counting from the last message *it* received from the venue. The
+  client's timer starts from the last *frame* in which that venue's levels
+  appeared, which is downstream of the server's own publish cadence. The
+  client's number will therefore run slightly behind the server's — by
+  roughly one publish interval — not because either is wrong, but because
+  they're two different clocks measuring two different events. The README
+  should say plainly which one the header shows (the client's own
+  observation, not the server's internal staleness state).
+- **The inference has a concrete blind spot, not just a theoretical one.**
+  A venue that is publishing completely normally but whose levels never
+  make the top 10 (e.g. consistently the worse-priced side of two liquid
+  venues) would look identical to a genuinely stale venue — absent from
+  the levels either way. Unlikely with only two venues in this project,
+  but it is the kind of failure that goes wrong quietly rather than
+  loudly. The README's note that a real system would carry venue health on
+  the wire (rather than a fixed-schema client inferring it) should name
+  this blind spot as the concrete reason, not as a general principle.
 
 ### What's dropped, and why
 
@@ -346,9 +378,11 @@ Required real verification:
 All of the above are pure unit tests: pass `Instant` in as a parameter
 rather than calling `Instant::now()` inside the function under test, so
 tests can supply a fake/fixed clock without needing `tokio::time::pause`.
-Filed per this project's access-based convention (`.claude/rules/testing.md`)
-— unit tests alongside the code in `src/feed.rs`, `src/aggregator.rs`,
-`src/exchange/mod.rs`.
+Filed alongside the code under test in `src/feed.rs`, `src/aggregator.rs`,
+and `src/exchange/mod.rs` — a unit test needs access to internal items
+(backoff state, the token bucket, per-venue thresholds) that aren't public,
+so it belongs with the code, not in `tests/`, which only reaches the public
+surface.
 
 Integration-level verification (acceptance criteria, below) exercises the
 real binary and a real proxy interruption — this is the truth anchor for
