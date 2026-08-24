@@ -49,12 +49,27 @@ services:
     # the container exits shortly after starting — the three-task select!
     # in main.rs ends the whole process the instant the feed task ends.
 
-# The demo client (src/bin/client.rs) isn't a compose service. Its
-# cursor-addressed redraw needs exclusive control of a real terminal;
-# `docker compose up`'s combined view prefixes every line with
-# "servicename | ", which pushes lines past 80 columns and wraps them,
-# tearing the redraw apart. Run it on the host instead, against the port
-# `app` publishes above:
-#
-#     docker compose up -d app
-#     cargo run --bin client -- --addr http://127.0.0.1:50051
+  # Demonstration client, not part of the service. Shares the image `app`
+  # builds (`image:`, not `build:`) rather than rebuilding it, and overrides
+  # only this service's entrypoint/command — `app`'s own ENTRYPOINT stays
+  # ["keyrock-case-study"] so `docker compose run --rm app --pair btcusd`
+  # keeps passing args straight through to the server binary.
+  #
+  # `profiles: ["demo"]` keeps it out of `docker compose up`'s default set —
+  # not because it's broken, but because `up` multiplexes every service's
+  # output and prefixes each line with "client  | ", and cursor-addressed
+  # redraw cannot survive a log multiplexer capturing line by line. `tty:
+  # true` doesn't fix that; the problem is upstream of rendering. Run it
+  # with `docker compose run`, which attaches stdin/stdout to one service
+  # directly — the correct idiom for an interactive tool regardless:
+  #
+  #     docker compose up -d app
+  #     docker compose run --rm client
+  client:
+    image: keyrock-case-study:local
+    entrypoint: ["client"]
+    command: ["--addr", "http://app:50051"]
+    depends_on: [app]
+    profiles: ["demo"]
+    tty: true
+    stdin_open: true

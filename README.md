@@ -44,6 +44,7 @@ signature change.
 
 ```sh
 docker compose up --build               # server, containerised, zero setup
+docker compose run --rm client          # watch the merged book (see Client)
 cargo run --bin keyrock-case-study --   # defaults: --pair ethbtc --port 50051
 cargo run --bin keyrock-case-study -- --pair btcusd --port 12345
 ```
@@ -76,15 +77,21 @@ production should ship without a toggle.
 
 `src/bin/client.rs` is a demonstration terminal viewer, not part of the
 service — a second binary that streams `BookSummary` and redraws the
-combined book in place (colourised when stdout is a terminal). It's not a
-`compose.yml` service: its cursor-addressed redraw needs a real terminal, and
-`docker compose up`'s combined, line-prefixed output isn't one. Run the
-server via compose and the client on the host, against the port it publishes:
+combined book in place (colourised when stdout is a terminal).
 
 ```sh
-docker compose up -d app
-cargo run --bin client -- --addr http://127.0.0.1:50051
+docker compose up -d              # server
+docker compose run --rm client    # the book
 ```
+
+`docker compose run` attaches stdin/stdout to just that one service — no
+line prefix, no interleaving with `app`'s logs — which is what
+cursor-addressed redraw needs. `docker compose up` would multiplex both
+services' output and prefix every line with the service name, tearing the
+redraw apart; that's a log-multiplexing problem, not a client bug, which is
+why the service stays out of `up`'s default set (`profiles: ["demo"]` in
+`compose.yml`). Locally, without Docker:
+`cargo run --bin client -- --addr http://127.0.0.1:50051`.
 
 ## Design decisions
 
@@ -179,12 +186,14 @@ cargo fmt --check
 ```sh
 docker compose up --build               # app, gRPC on 127.0.0.1:50051
 docker compose run --rm app --pair btcusd --port 12345
+docker compose run --rm client          # the demo viewer — see Client above
 ```
 
-One service, `app`. The demo client is deliberately not a `compose.yml`
-service — see [Client](#client) for why (cursor-addressed redraw and
-compose's line-prefixed combined output don't mix) and how to run it
-alongside `app`.
+Two services, one image: `app` (the server) and `client` (the demo viewer,
+sharing `app`'s image via `image:` rather than rebuilding). `client` sits
+behind `profiles: ["demo"]`, so `docker compose up` starts only `app` —
+`client` is defined but dormant until asked for with `run`. See
+[Client](#client) for why.
 
 Two-stage build (`rust:1.97-slim-bookworm` → `debian:bookworm-slim`
 non-root), no `ca-certificates` needed (`rustls-tls-webpki-roots` bundles its
@@ -195,4 +204,14 @@ working as designed: a dead feed task ends the whole process rather than
 serving stale data. Development here runs through a CONNECT proxy (Binance
 is unreachable from the author's network); set `PROXY_HOST`/`PROXY_PORT` in
 `.env` if yours needs one too.
+
+## What I'd change for production
+
+| Limitation | What I'd do |
+| --- | --- |
+| Pair is per process — `BookSummary` takes `Empty` | Pair on the request; Binance carries 1024 streams per connection |
+| Tick size hardcoded at 8 decimals | Per-pair tick from each venue's `exchangeInfo` |
+| `merge()` returns the proto types | An internal type, once there's a second consumer |
+| Reflection always on | Behind a config toggle |
+| `Level.exchange` allocates per level | Only matters if it shows up in a profile |
 
