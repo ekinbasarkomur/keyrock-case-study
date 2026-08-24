@@ -96,13 +96,34 @@ async fn main() -> Result<()> {
     // both "server not listening yet" (compose's `depends_on` waits for the
     // container to start, not for the port to accept) and "server died and
     // came back."
-    loop {
-        match connect_and_stream(&cli.addr, colour, &mut stats).await {
-            Ok(()) => info!("stream ended, reconnecting"),
-            Err(e) => warn!(%e, "connect failed, retrying"),
+    let reconnect_loop = async {
+        loop {
+            match connect_and_stream(&cli.addr, colour, &mut stats).await {
+                Ok(()) => info!("stream ended, reconnecting"),
+                Err(e) => warn!(%e, "connect failed, retrying"),
+            }
+            sleep(Duration::from_secs(1)).await;
         }
-        sleep(Duration::from_secs(1)).await;
+    };
+
+    // Explicit handler, not relying on the OS default SIGINT disposition:
+    // this binary runs as PID 1 in the `client` container (exec-form
+    // `ENTRYPOINT`/`entrypoint:`, no shell in between), and Linux does not
+    // apply a signal's default action to PID 1 unless the process installs
+    // its own handler for it — PID 1 silently ignores an unhandled SIGINT
+    // rather than terminating. `tokio::signal::ctrl_c()` installs one, so
+    // Ctrl-C exits both in a container and when run directly with `cargo
+    // run`. Confirmed the un-fixed binary really did swallow `SIGINT` as
+    // PID 1 (`docker kill --signal SIGINT` on a running container left it
+    // up) before adding this.
+    tokio::select! {
+        _ = reconnect_loop => {}
+        _ = tokio::signal::ctrl_c() => {
+            info!("received ctrl-c, exiting");
+        }
     }
+
+    Ok(())
 }
 
 /// Connects once, streams `Summary` messages until the stream ends or
