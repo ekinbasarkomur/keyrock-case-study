@@ -168,3 +168,24 @@ since `is_terminal()` — and therefore all colour/bar output — is false
 under redirection) and confirming programmatically that the row with the
 largest amount got a full-width bar and every other row's bar length
 matched its amount's fraction of that max.
+
+## 7. Depth bar colour: side-matched (green/red) and darker, not neutral grey
+
+**Supersedes:** entry 6's `BAR_BG` (a single neutral grey, `48;5;238`, for
+both sides).
+
+**What changed:** `BAR_BG` split into `BAR_BG_BID` (`48;5;22`, dark green)
+and `BAR_BG_ASK` (`48;5;52`, dark red) — the bar now matches its side's
+existing foreground colour instead of a neutral shade, and both are a
+darker/more solid 256-colour tone than the grey they replaced. `level_cell`
+and `shade_cell` take the bg colour as a parameter now, rather than a single
+module constant.
+
+**Why:** asked for directly, on seeing entry 6's neutral-grey version live —
+grey read as a separate, unrelated highlight rather than an extension of
+the bid/ask colour coding already in place, and the grey's tone read as too
+faint ("less transparent" — a more saturated, solid fill, not a pale tint).
+
+**Verification:** same PTY-capture method as entry 6, re-run against this
+change — confirmed bid cells now emit `48;5;22` and ask cells `48;5;52` in
+their bar runs, replacing every prior `48;5;238` occurrence.
