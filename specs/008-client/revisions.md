@@ -131,3 +131,40 @@ produced `Exited (0)` with a logged `received ctrl-c, exiting` line. This
 also fixes Ctrl-C under plain `cargo run --bin client` (not PID 1 there,
 already worked, but the explicit handler is now the same code path either
 way — one behavior, not two).
+
+## 6. Depth bar: shaded row background, scaled to the largest amount shown
+
+**Supersedes:** `spec.md`'s "Display" and "Colour" sections, which specified
+only foreground colour (bids green, asks red, venue dim, negative spread
+bold red) and no per-row background treatment.
+
+**What changed:** each bid/ask cell's background is now shaded left-to-right
+proportional to that level's amount against `max_amount` — the largest
+amount across *both* sides currently displayed (a shared scale, not
+per-side), so a bar of the same length on either side represents the same
+size. Implemented as `shade_cell()`: builds the cell's plain 35-char text,
+then emits ANSI runs merging two independent boundaries — `CELL_FG_SPLIT`
+(price/amount foreground vs. dim venue-label foreground) and `fill_len`
+(bar background vs. terminal-default background) — each run re-stating both
+its foreground and background explicitly, since SGR state otherwise
+persists across writes and an unstated attribute would bleed into the next
+run.
+
+**Why:** asked for directly — the standard depth-bar convention from
+exchange order-book UIs (Binance/Bitstamp's own), so market depth
+concentration reads at a glance instead of requiring the numbers to be
+read and compared by eye. Scale choice (shared max, not per-side) and
+render style (shaded background, not a separate bar of block characters)
+were both explicit choices confirmed before implementing, not defaults —
+per-side max would make the two columns incomparable at a glance, and a
+foreground block-character bar risked competing visually with the existing
+bid/ask colour coding a plain background shade doesn't.
+
+**Verification:** the existing testing convention (`spec.md`'s "Tests"
+section: none, deliberately — nothing here a person watching the screen
+wouldn't catch faster) still applies; this was checked by capturing real
+PTY output (`cargo run` under a pseudo-terminal, not a redirected pipe,
+since `is_terminal()` — and therefore all colour/bar output — is false
+under redirection) and confirming programmatically that the row with the
+largest amount got a full-width bar and every other row's bar length
+matched its amount's fraction of that max.
