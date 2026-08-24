@@ -5,12 +5,13 @@ finished service connects to Binance and Bitstamp order-book websocket
 feeds, merges the two books for one traded pair, and streams the spread plus
 the top 10 bids/asks over gRPC (`proto/orderbook.proto`).
 
-**Steps 0-5 of an 11-step build order have landed.** Both feeds carry real
+**Steps 0-6 of an 11-step build order have landed.** Both feeds carry real
 market data into one aggregator task, which drives a real two-venue
 `merge()` and publishes into a `watch` channel that `src/server.rs` streams
 to gRPC clients on every change. **The gRPC output is a genuine combined
-book** — top 10 bids and asks across both venues, sorted and tie-broken. No
-reconnection/staleness handling yet — that's step 6.
+book** — top 10 bids and asks across both venues, sorted and tie-broken.
+A terminal client (`cargo run --bin client`) renders that stream live (see
+[Client](#client)). No reconnection/staleness handling yet — that's step 7.
 
 ## Build order
 
@@ -22,10 +23,10 @@ reconnection/staleness handling yet — that's step 6.
 | 3 | Wire step 1 into step 2 — first real end-to-end milestone | Done |
 | 4 | Add the Bitstamp feed | Done |
 | 5 | Real `merge()` + top-10 + spread — the core deliverable | Done |
-| 6 | Reconnection + staleness handling | Not started |
-| 7 | Remaining edge cases | Not started |
-| 8 | Latency measurement (p50/p99), written up here | Not started |
-| 9 | Add the `client` binary to `compose.yml` | Not started |
+| 6 | The example client (`src/bin/client.rs`) | Done |
+| 7 | Reconnection + staleness handling | Not started |
+| 8 | Remaining edge cases / tests | Not started |
+| 9 | Latency measurement (p50/p99), written up here | Not started |
 | 10 | README pass, final cleanup | Not started |
 
 The aggregator holds a `BTreeMap<Venue, VenueState>` rather than one field
@@ -42,10 +43,14 @@ signature change.
 ## Quick start
 
 ```sh
-cargo run --                            # defaults: --pair ethbtc --port 50051
-cargo run -- --pair btcusd --port 12345
-docker compose up --build               # same thing, containerised
+docker compose up --build               # server, containerised, zero setup
+docker compose run --rm client          # watch the merged book (see Client)
+cargo run --bin keyrock-case-study --   # defaults: --pair ethbtc --port 50051
+cargo run --bin keyrock-case-study -- --pair btcusd --port 12345
 ```
+
+`--bin` is required now that this crate builds two binaries — the server and
+`src/bin/client.rs` (see [Client](#client)).
 
 Runs four tasks under one `select!`: both feeds (one generic
 `feed::run_feed<E>` loop drives both), the aggregator, and the gRPC server.
@@ -67,6 +72,26 @@ Output is a real, merged ETHBTC book — both `"binance"` and `"bitstamp"`
 levels appear in the same response, interleaved by price. Reflection is
 unconditionally enabled — convenient for a reviewer, not something
 production should ship without a toggle.
+
+## Client
+
+`src/bin/client.rs` is a demonstration terminal viewer, not part of the
+service — a second binary that streams `BookSummary` and redraws the
+combined book in place (colourised when stdout is a terminal).
+
+```sh
+docker compose up -d              # server
+docker compose run --rm client    # the book
+```
+
+`docker compose run` attaches stdin/stdout to just that one service — no
+line prefix, no interleaving with `app`'s logs — which is what
+cursor-addressed redraw needs. `docker compose up` would multiplex both
+services' output and prefix every line with the service name, tearing the
+redraw apart; that's a log-multiplexing problem, not a client bug, which is
+why the service stays out of `up`'s default set (`profiles: ["demo"]` in
+`compose.yml`). Locally, without Docker:
+`cargo run --bin client -- --addr http://127.0.0.1:50051`.
 
 ## Design decisions
 
@@ -116,7 +141,9 @@ production should ship without a toggle.
 │   ├── merge.rs            pure merge: Side, merge_side, merge
 │   ├── aggregator.rs       per-venue state, publishes watch
 │   ├── server.rs           OrderbookAggregator gRPC service
-│   └── main.rs             CLI entry, spawns the tasks
+│   ├── main.rs             CLI entry, spawns the tasks
+│   └── bin/
+│       └── client.rs       demo terminal viewer, second binary
 └── tests/
     ├── cli.rs              real binary
     └── grpc.rs             real tonic client
@@ -157,9 +184,16 @@ cargo fmt --check
 ## Docker
 
 ```sh
-docker compose up --build               # stays running, serves gRPC on 127.0.0.1:50051
+docker compose up --build               # app, gRPC on 127.0.0.1:50051
 docker compose run --rm app --pair btcusd --port 12345
+docker compose run --rm client          # the demo viewer — see Client above
 ```
+
+Two services, one image: `app` (the server) and `client` (the demo viewer,
+sharing `app`'s image via `image:` rather than rebuilding). `client` sits
+behind `profiles: ["demo"]`, so `docker compose up` starts only `app` —
+`client` is defined but dormant until asked for with `run`. See
+[Client](#client) for why.
 
 Two-stage build (`rust:1.97-slim-bookworm` → `debian:bookworm-slim`
 non-root), no `ca-certificates` needed (`rustls-tls-webpki-roots` bundles its
@@ -170,4 +204,14 @@ working as designed: a dead feed task ends the whole process rather than
 serving stale data. Development here runs through a CONNECT proxy (Binance
 is unreachable from the author's network); set `PROXY_HOST`/`PROXY_PORT` in
 `.env` if yours needs one too.
+
+## What I'd change for production
+
+| Limitation | What I'd do |
+| --- | --- |
+| Pair is per process — `BookSummary` takes `Empty` | Pair on the request; Binance carries 1024 streams per connection |
+| Tick size hardcoded at 8 decimals | Per-pair tick from each venue's `exchangeInfo` |
+| `merge()` returns the proto types | An internal type, once there's a second consumer |
+| Reflection always on | Behind a config toggle |
+| `Level.exchange` allocates per level | Only matters if it shows up in a profile |
 
