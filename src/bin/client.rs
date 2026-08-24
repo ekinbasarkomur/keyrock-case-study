@@ -188,6 +188,18 @@ fn render(venues: &[Venue], summary: &Summary, stats: &Stats, colour: bool) -> S
     row(&mut out, &format!("{:^35} {:^35}", "BIDS", "ASKS"));
     border(&mut out, '├', '┤');
 
+    // One shared max across *both* sides, not per-side — so a bid bar and
+    // an ask bar of the same visual length really do represent the same
+    // amount, at the cost of a lopsided book making one side's bars all
+    // look small. Depth-bar convention (Binance/Bitstamp's own book UIs),
+    // not this project's invention.
+    let max_amount = summary
+        .bids
+        .iter()
+        .chain(summary.asks.iter())
+        .map(|l| l.amount)
+        .fold(0.0_f64, f64::max);
+
     for i in 0..ROWS {
         let bid = summary.bids.get(i);
         let ask = summary.asks.get(i);
@@ -195,8 +207,8 @@ fn render(venues: &[Venue], summary: &Summary, stats: &Stats, colour: bool) -> S
             &mut out,
             &format!(
                 "{} {}",
-                level_cell(bid, colour, "\x1b[32m"),
-                level_cell(ask, colour, "\x1b[31m")
+                level_cell(bid, colour, "32", BAR_BG_BID, max_amount),
+                level_cell(ask, colour, "31", BAR_BG_ASK, max_amount)
             ),
         );
     }
@@ -251,20 +263,82 @@ fn visible_len(s: &str) -> usize {
     len
 }
 
-/// One bid or ask cell: price, amount, venue label. `None` renders as
-/// blank padding of the same width, so a side with fewer than 10 levels
-/// doesn't reflow the layout.
-fn level_cell(level: Option<&Level>, colour: bool, price_code: &str) -> String {
-    match level {
-        Some(l) => {
-            let price_amount = format!("{:>12.8} {:>13.8}", l.price, l.amount);
-            let price_amount = colourize(&price_amount, price_code, colour);
-            let venue = format!(" {:<8}", l.exchange);
-            let venue = colourize(&venue, "\x1b[2m", colour);
-            format!("{price_amount}{venue}")
-        }
-        None => " ".repeat(35),
+/// Total visible width of one bid/ask cell: `"{:>12.8} {:>13.8} {:<8}"`.
+const CELL_WIDTH: usize = 35;
+
+/// Where the price/amount region ends and the venue label begins, within a
+/// cell — the two get different foreground treatment (`price_fg` vs dim).
+const CELL_FG_SPLIT: usize = 26;
+
+/// 256-colour depth-bar backgrounds, one per side, matching the side's
+/// foreground colour (bid green, ask red) rather than a neutral grey — a
+/// deliberately solid, dark shade of that colour (not a paler "tint") so
+/// the bar reads clearly instead of a translucent-looking highlight.
+const BAR_BG_BID: &str = "48;5;22";
+const BAR_BG_ASK: &str = "48;5;52";
+
+/// One bid or ask cell: price, amount, venue label, with a depth bar shaded
+/// into the row's background — proportional to `level`'s amount against
+/// `max_amount` (the largest amount across *both* sides currently
+/// displayed, per this project's depth-bar convention: same bar length on
+/// either side means the same size). `None` renders as blank padding of the
+/// same width, so a side with fewer than 10 levels doesn't reflow the
+/// layout.
+fn level_cell(
+    level: Option<&Level>,
+    colour: bool,
+    price_fg: &str,
+    bar_bg: &str,
+    max_amount: f64,
+) -> String {
+    let Some(l) = level else {
+        return " ".repeat(CELL_WIDTH);
+    };
+    let plain = format!("{:>12.8} {:>13.8} {:<8}", l.price, l.amount, l.exchange);
+    if !colour {
+        return plain;
     }
+
+    let fill_len = if max_amount > 0.0 {
+        ((l.amount / max_amount) * CELL_WIDTH as f64)
+            .round()
+            .clamp(0.0, CELL_WIDTH as f64) as usize
+    } else {
+        0
+    };
+    shade_cell(&plain, price_fg, bar_bg, fill_len)
+}
+
+/// Wraps `plain` (exactly `CELL_WIDTH` visible chars) in ANSI codes, run by
+/// run, combining two independent boundaries: `CELL_FG_SPLIT` (foreground
+/// colour changes from `price_fg` to dim) and `fill_len` (background turns
+/// from `bar_bg` to the terminal default). Each run re-states both its
+/// foreground and background explicitly — SGR state otherwise persists
+/// across writes, so leaving either unstated at a run boundary would bleed
+/// the previous run's colour into the next one.
+fn shade_cell(plain: &str, price_fg: &str, bar_bg: &str, fill_len: usize) -> String {
+    let mut boundaries = [
+        0,
+        CELL_FG_SPLIT.min(CELL_WIDTH),
+        fill_len.min(CELL_WIDTH),
+        CELL_WIDTH,
+    ];
+    boundaries.sort_unstable();
+
+    let chars: Vec<char> = plain.chars().collect();
+    let mut out = String::new();
+    for w in boundaries.windows(2) {
+        let (start, end) = (w[0], w[1]);
+        if start == end {
+            continue;
+        }
+        let fg = if start < CELL_FG_SPLIT { price_fg } else { "2" };
+        let bg = if start < fill_len { bar_bg } else { "49" };
+        out.push_str(&format!("\x1b[{fg};{bg}m"));
+        out.extend(&chars[start..end]);
+    }
+    out.push_str("\x1b[0m");
+    out
 }
 
 /// The bottom summary line: raw spread, spread in basis points, running
