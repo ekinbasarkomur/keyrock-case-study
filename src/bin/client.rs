@@ -207,8 +207,8 @@ fn render(venues: &[Venue], summary: &Summary, stats: &Stats, colour: bool) -> S
             &mut out,
             &format!(
                 "{} {}",
-                level_cell(bid, colour, "32", max_amount),
-                level_cell(ask, colour, "31", max_amount)
+                level_cell(bid, colour, "32", BAR_BG_BID, max_amount),
+                level_cell(ask, colour, "31", BAR_BG_ASK, max_amount)
             ),
         );
     }
@@ -270,10 +270,12 @@ const CELL_WIDTH: usize = 35;
 /// cell — the two get different foreground treatment (`price_fg` vs dim).
 const CELL_FG_SPLIT: usize = 26;
 
-/// 256-colour background for the depth bar's filled portion — a plain dark
-/// grey, deliberately subtle so it reads as a bar and not as a second
-/// highlight competing with the bid/ask foreground colours.
-const BAR_BG: &str = "48;5;238";
+/// 256-colour depth-bar backgrounds, one per side, matching the side's
+/// foreground colour (bid green, ask red) rather than a neutral grey — a
+/// deliberately solid, dark shade of that colour (not a paler "tint") so
+/// the bar reads clearly instead of a translucent-looking highlight.
+const BAR_BG_BID: &str = "48;5;22";
+const BAR_BG_ASK: &str = "48;5;52";
 
 /// One bid or ask cell: price, amount, venue label, with a depth bar shaded
 /// into the row's background — proportional to `level`'s amount against
@@ -282,7 +284,13 @@ const BAR_BG: &str = "48;5;238";
 /// either side means the same size). `None` renders as blank padding of the
 /// same width, so a side with fewer than 10 levels doesn't reflow the
 /// layout.
-fn level_cell(level: Option<&Level>, colour: bool, price_fg: &str, max_amount: f64) -> String {
+fn level_cell(
+    level: Option<&Level>,
+    colour: bool,
+    price_fg: &str,
+    bar_bg: &str,
+    max_amount: f64,
+) -> String {
     let Some(l) = level else {
         return " ".repeat(CELL_WIDTH);
     };
@@ -298,17 +306,17 @@ fn level_cell(level: Option<&Level>, colour: bool, price_fg: &str, max_amount: f
     } else {
         0
     };
-    shade_cell(&plain, price_fg, fill_len)
+    shade_cell(&plain, price_fg, bar_bg, fill_len)
 }
 
 /// Wraps `plain` (exactly `CELL_WIDTH` visible chars) in ANSI codes, run by
 /// run, combining two independent boundaries: `CELL_FG_SPLIT` (foreground
 /// colour changes from `price_fg` to dim) and `fill_len` (background turns
-/// from the bar colour to the terminal default). Each run re-states both
-/// its foreground and background explicitly — SGR state otherwise persists
+/// from `bar_bg` to the terminal default). Each run re-states both its
+/// foreground and background explicitly — SGR state otherwise persists
 /// across writes, so leaving either unstated at a run boundary would bleed
 /// the previous run's colour into the next one.
-fn shade_cell(plain: &str, price_fg: &str, fill_len: usize) -> String {
+fn shade_cell(plain: &str, price_fg: &str, bar_bg: &str, fill_len: usize) -> String {
     let mut boundaries = [
         0,
         CELL_FG_SPLIT.min(CELL_WIDTH),
@@ -325,7 +333,7 @@ fn shade_cell(plain: &str, price_fg: &str, fill_len: usize) -> String {
             continue;
         }
         let fg = if start < CELL_FG_SPLIT { price_fg } else { "2" };
-        let bg = if start < fill_len { BAR_BG } else { "49" };
+        let bg = if start < fill_len { bar_bg } else { "49" };
         out.push_str(&format!("\x1b[{fg};{bg}m"));
         out.extend(&chars[start..end]);
     }
