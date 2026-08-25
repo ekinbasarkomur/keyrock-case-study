@@ -72,7 +72,7 @@ async fn book_summary_streams_multiple_updates_not_a_single_shot_response() {
     // mock of any of those three pieces.
     let (tx, rx) = watch::channel::<Option<Arc<Summary>>>(None);
     let (feed_tx, feed_rx) = mpsc::channel::<(Venue, Book)>(32);
-    tokio::spawn(aggregator::run(feed_rx, tx));
+    tokio::spawn(aggregator::run(feed_rx, tx, "ethbtc".to_string()));
 
     // Send the first book before the client subscribes — `WatchStream`
     // yields whatever the current value is on first poll, so this is what

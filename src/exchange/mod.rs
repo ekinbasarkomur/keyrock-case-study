@@ -4,6 +4,7 @@
 //! loop instead of one hand-written loop per exchange.
 
 use std::fmt;
+use std::time::Duration;
 
 use crate::model::Book;
 
@@ -16,7 +17,7 @@ pub mod bitstamp;
 /// the first variant — `BTreeMap<Venue, _>` iteration order (and this
 /// step's "first entry wins" `summarise` selection) depends on declaration
 /// order, not insertion order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Venue {
     Binance,
     Bitstamp,
@@ -27,6 +28,57 @@ impl fmt::Display for Venue {
         match self {
             Venue::Binance => write!(f, "binance"),
             Venue::Bitstamp => write!(f, "bitstamp"),
+        }
+    }
+}
+
+impl Venue {
+    /// `(capacity, tokens_per_second)` for this venue's reconnect token
+    /// bucket (`src/feed.rs`'s `TokenBucket`) — an absolute ceiling on
+    /// connection attempts, separate from and composed with the backoff
+    /// delay. Lives here, next to where `staleness_threshold` will land in
+    /// step 7's next piece, so every per-venue fact stays in one place and
+    /// both `match`es stay exhaustive.
+    pub fn connect_rate(self) -> (f64, f64) {
+        match self {
+            // Binance documents 300 connection attempts per 5 minutes per
+            // IP, i.e. one token per second on average. Capacity is
+            // deliberately small (5, not 300) — a capacity of 300 would let
+            // the very first burst spend the entire five-minute allowance in
+            // one go, which defeats the point of having a ceiling at all.
+            Venue::Binance => (5.0, 1.0),
+            // Bitstamp publishes no documented connection-rate limit. This
+            // is a conservative guess, not a real figure — half of
+            // Binance's refill rate and the same small capacity — stated
+            // here plainly rather than presented as fact.
+            Venue::Bitstamp => (5.0, 0.5),
+        }
+    }
+
+    /// How long a venue may go silent before its last-known book is excluded
+    /// from the merge (`src/aggregator.rs`'s pre-filter — `merge()` itself
+    /// never sees a clock). Lives next to `connect_rate` for the same reason:
+    /// every per-venue fact stays in one place and both `match`es stay
+    /// exhaustive.
+    pub fn staleness_threshold(self) -> Duration {
+        match self {
+            // Binance's depth20@100ms stream pushes a full snapshot every
+            // ~100ms whether or not the book changed, so silence itself
+            // means the connection is dead, not a quiet market. 1.5s is
+            // ~15 missed snapshots' worth of grace — enough to absorb a
+            // couple of dropped/delayed frames without flapping, tight
+            // enough to exclude a genuinely dead feed within a couple of
+            // seconds.
+            Venue::Binance => Duration::from_secs_f64(1.5),
+            // Measured live, 2026-08-24, ETHBTC, ~5.25 minutes: 792
+            // messages, max observed gap 1.795s. Bitstamp only publishes on
+            // change, so silence can mean a genuinely quiet market rather
+            // than a dead connection — threshold set to ~4x the observed
+            // max (not the low end of the 3-4x range) since a 5-minute
+            // sample is short and a genuinely quiet moment could plausibly
+            // produce a longer natural gap than this window happened to
+            // catch. See README for the full measurement.
+            Venue::Bitstamp => Duration::from_secs(8),
         }
     }
 }
@@ -55,4 +107,21 @@ pub trait Exchange {
     /// `Err` — for anything that isn't a book payload, so a stray
     /// control/lifecycle message never kills the read loop.
     fn parse(&self, raw: &str) -> Option<Book>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches the two venues' staleness thresholds collapsing to one shared
+    /// value (e.g. a copy-paste bug) — the whole point of per-venue
+    /// thresholds is that Binance's silence means something different from
+    /// Bitstamp's.
+    #[test]
+    fn thresholds_differ_per_venue() {
+        assert_ne!(
+            Venue::Binance.staleness_threshold(),
+            Venue::Bitstamp.staleness_threshold()
+        );
+    }
 }

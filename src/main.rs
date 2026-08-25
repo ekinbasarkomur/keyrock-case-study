@@ -11,11 +11,11 @@
 //! and spawns it, both sending into the same `mpsc::Sender`), the
 //! aggregator task (`aggregator::run`, step 3 — owns per-venue book state,
 //! calls `merge::summarise`, publishes into the watch channel), and the
-//! gRPC server (`server::router(rx).serve(addr)`). See the `select!` at the
-//! bottom of [`main`] for why all four are supervised together rather than
-//! run sequentially or fire-and-forgotten. gRPC output stays single-venue
-//! this step (`summarise` reads the map's lowest-ordered entry) — real
-//! two-book merging is step 5.
+//! gRPC server (`server::router(rx).serve(addr)`). See the `JoinSet` loop at
+//! the bottom of [`main`] for why all four are supervised together rather
+//! than run sequentially or fire-and-forgotten. gRPC output stays
+//! single-venue this step (`summarise` reads the map's lowest-ordered
+//! entry) — real two-book merging is step 5.
 
 use std::net::SocketAddr;
 
@@ -28,7 +28,24 @@ use keyrock_case_study::model::Book;
 use keyrock_case_study::{aggregator, feed, server};
 use keyrock_case_study::{config::Config, telemetry};
 use tokio::sync::{mpsc, watch};
-use tracing::info;
+use tokio::task::JoinSet;
+use tracing::{error, info, warn};
+
+/// Which of the four supervised tasks a [`TaskResult`] came from. Carries a
+/// `Venue` for the feed variant since there are two feed tasks — `JoinSet`
+/// itself doesn't tell you which task ended, unlike `select!`'s branches, so
+/// the identity has to travel alongside the result.
+#[derive(Debug, Clone, Copy)]
+enum Component {
+    Feed(Venue),
+    Aggregator,
+    Server,
+}
+
+/// What every spawned task normalises its outcome into before the
+/// `JoinSet` sees it, so `join_next()` can be awaited in a single loop
+/// regardless of which task actually finished.
+type TaskResult = (Component, Result<()>);
 
 #[derive(Parser)]
 #[command(name = "keyrock-case-study", version, about = "Keyrock case study")]
@@ -88,55 +105,77 @@ async fn main() -> Result<()> {
     let pair = config.pair.clone();
     let binance_tx = feed_tx.clone();
     let bitstamp_tx = feed_tx;
-    let binance_handle = tokio::spawn(feed::run_feed(Binance, pair.clone(), binance_tx));
-    let bitstamp_handle = tokio::spawn(feed::run_feed(Bitstamp, pair, bitstamp_tx));
-    let aggregator_handle = tokio::spawn(aggregator::run(feed_rx, tx));
-    let server_handle = tokio::spawn(async move { server::router(rx).serve(addr).await });
 
-    // `select!` over all three `JoinHandle`s, not sequential `.await`s and
-    // not detached spawns with dropped handles:
-    //   - Sequential `.await`s would never reach the second/third handle
-    //     while the first is still running, so a dead gRPC server behind a
-    //     live feed (or vice versa) would go unnoticed indefinitely.
-    //   - Dropping the handles would detach the tasks; a panic in any one
-    //     of them would print nothing and `main` could still return exit 0
-    //     with nothing actually running.
+    // Every task is wrapped in an async block that tags its outcome with a
+    // `Component` before handing it to the `JoinSet` — a `JoinSet` (unlike
+    // `select!`'s branches) doesn't tell you which task finished on its own,
+    // so the identity has to travel inside the result itself.
+    let mut tasks: JoinSet<TaskResult> = JoinSet::new();
+    let binance_pair = pair.clone();
+    let aggregator_pair = pair.clone();
+    tasks.spawn(async move {
+        let res = feed::run_feed(Binance, binance_pair, binance_tx).await;
+        (Component::Feed(Venue::Binance), res)
+    });
+    tasks.spawn(async move {
+        let res = feed::run_feed(Bitstamp, pair, bitstamp_tx).await;
+        (Component::Feed(Venue::Bitstamp), res)
+    });
+    tasks.spawn(async move {
+        aggregator::run(feed_rx, tx, aggregator_pair).await;
+        (Component::Aggregator, Ok(()))
+    });
+    tasks.spawn(async move {
+        let res = server::router(rx)
+            .serve(addr)
+            .await
+            .context("server task failed");
+        (Component::Server, res)
+    });
+
+    // Await the `JoinSet`, not sequential `.await`s and not detached spawns
+    // with dropped handles:
+    //   - Sequential `.await`s would never reach the second/third task while
+    //     the first is still running, so a dead gRPC server behind a live
+    //     feed (or vice versa) would go unnoticed indefinitely.
+    //   - Dropping the handles would detach the tasks; a panic in any one of
+    //     them would print nothing and `main` could still return exit 0 with
+    //     nothing actually running.
     // A server serving a dead feed publishes stale prices under a
     // "still live" appearance, which is worse than the process not running
     // at all — so the moment any one task ends, the whole process ends,
     // propagating that task's error (or exiting cleanly if it ended without
-    // one).
-    tokio::select! {
-        res = binance_handle => match res {
-            Ok(Ok(())) => {
-                info!("binance feed task ended");
-                Ok(())
+    // one). This is identical to the `select!` policy it replaces: no
+    // feed-specific carve-out yet (that lands in a later step of this
+    // packet), just a supervisor shape that can express one later.
+    match tasks.join_next().await {
+        Some(Ok((component, Ok(())))) => {
+            match component {
+                Component::Feed(venue) => info!(?venue, "feed task ended"),
+                Component::Aggregator => info!("aggregator task ended"),
+                Component::Server => info!("server task ended"),
             }
-            Ok(Err(e)) => Err(e).context("binance feed task failed"),
-            Err(e) => Err(e).context("binance feed task panicked"),
+            Ok(())
+        }
+        Some(Ok((component, Err(e)))) => match component {
+            Component::Feed(venue) => Err(e).with_context(|| format!("{venue:?} feed task failed")),
+            Component::Aggregator => Err(e).context("aggregator task failed"),
+            Component::Server => Err(e).context("server task failed"),
         },
-        res = bitstamp_handle => match res {
-            Ok(Ok(())) => {
-                info!("bitstamp feed task ended");
-                Ok(())
-            }
-            Ok(Err(e)) => Err(e).context("bitstamp feed task failed"),
-            Err(e) => Err(e).context("bitstamp feed task panicked"),
-        },
-        res = aggregator_handle => match res {
-            Ok(()) => {
-                info!("aggregator task ended");
-                Ok(())
-            }
-            Err(e) => Err(e).context("aggregator task panicked"),
-        },
-        res = server_handle => match res {
-            Ok(Ok(())) => {
-                info!("server task ended");
-                Ok(())
-            }
-            Ok(Err(e)) => Err(e).context("server task failed"),
-            Err(e) => Err(e).context("server task panicked"),
-        },
+        Some(Err(join_err)) if join_err.is_panic() => {
+            error!(error = %join_err, "task panicked");
+            Err(join_err).context("task panicked")
+        }
+        Some(Err(join_err)) => {
+            warn!(error = %join_err, "task was cancelled");
+            Err(join_err).context("task was cancelled")
+        }
+        None => {
+            // Unreachable in practice — four tasks were just spawned above —
+            // but `join_next()` returns `Option`, so handle it rather than
+            // `unwrap()` on something that isn't provably local here.
+            info!("task set was empty");
+            Ok(())
+        }
     }
 }
