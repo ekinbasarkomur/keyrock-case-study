@@ -56,3 +56,11 @@ tonic-prost-build = "0.14.6"
 
 [profile.release]
 strip = true
+# lto/codegen-units added and measured in 011-measurement (see
+# specs/011-measurement/): before/after build time and p50 both recorded
+# in README.md's Measurement section, not assumed to help. panic = "abort"
+# is deliberately not added — it would collapse JoinError::is_panic()'s
+# panic-vs-cancellation distinction the JoinSet supervisor in src/main.rs
+# depends on.
+lto = "fat"
+codegen-units = 1
