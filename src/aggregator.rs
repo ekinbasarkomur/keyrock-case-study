@@ -9,14 +9,30 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
+use tracing::error;
 
 use crate::exchange::Venue;
 use crate::merge;
 use crate::model::Book;
 use crate::orderbook::Summary;
+
+/// How long the aggregator waits for *any* venue to produce its first book
+/// before treating the pair as unsupported and exiting. 60s, confirmed (see
+/// spec.md 009-resilience, Open Questions #2): it covers one full backoff
+/// cycle (`1+2+4+8+16+30 = 61s`), so a venue that is genuinely mid-reconnect
+/// isn't killed before it gets a fair attempt — only a pair that has never
+/// produced data from either venue trips this.
+const GRACE: Duration = Duration::from_secs(60);
+
+/// How often the aggregator's receive loop checks the grace period while
+/// waiting for messages. Must be well under `GRACE` so the check fires
+/// promptly once the deadline passes, even if no venue ever sends anything —
+/// `rx.recv()` alone would block forever in that case, which is exactly the
+/// bug this polling interval exists to close.
+const GRACE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The last book received from one venue, plus when it arrived.
 struct VenueState {
@@ -35,32 +51,76 @@ struct Aggregator {
 /// corresponding venue slot, and publishes a fresh [`Summary`] into `tx`
 /// whenever [`merge::merge`] produces one.
 ///
-/// Returns when `rx.recv()` yields `None` — the feed's `Sender` was dropped,
-/// so there's nothing left to aggregate. No explicit shutdown signalling: the
-/// caller's `select!` already ends the whole process when any one task ends,
-/// the same supervision shape step 2 established.
-pub async fn run(mut rx: mpsc::Receiver<(Venue, Book)>, tx: watch::Sender<Option<Arc<Summary>>>) {
+/// Returns in two cases: `rx.recv()` yields `None` (the feed's `Sender` was
+/// dropped, nothing left to aggregate), or the grace period elapses with no
+/// venue ever having produced a book (`pair` was never valid on either
+/// venue — see `GRACE`'s doc comment). Both are fatal to the whole process
+/// under the `JoinSet` supervisor in `src/main.rs`: a feed reconnecting
+/// forever is not fatal, but the aggregator ending is — this is what makes
+/// "no data at all" detectable and actionable rather than a silent hang.
+pub async fn run(
+    mut rx: mpsc::Receiver<(Venue, Book)>,
+    tx: watch::Sender<Option<Arc<Summary>>>,
+    pair: String,
+) {
     let mut aggregator = Aggregator {
         venues: BTreeMap::new(),
     };
+    let started_at = Instant::now();
 
-    while let Some((venue, book)) = rx.recv().await {
-        aggregator.venues.insert(
-            venue,
-            VenueState {
-                book,
-                last_update: Instant::now(),
-            },
-        );
+    // A plain `while let Some(...) = rx.recv().await` loop can't notice time
+    // passing while it's blocked waiting for a first message that never
+    // arrives (Bitstamp accepts any channel name without validation, so an
+    // invalid pair produces exactly that: two connected, permanently silent
+    // feeds). `select!` against a periodic tick is what lets the grace-period
+    // check fire even when nothing is ever received.
+    let mut grace_check = tokio::time::interval(GRACE_CHECK_INTERVAL);
+    grace_check.tick().await; // first tick fires immediately; consume it up front
 
-        let fresh = fresh_venues(&aggregator.venues, Instant::now());
-        let summary = merge::merge(&fresh);
-        if let Some(summary) = summary {
-            // `send` only fails once every receiver has been dropped —
-            // nothing left to publish to, not worth logging or propagating.
-            let _ = tx.send(Some(Arc::new(summary)));
+    loop {
+        tokio::select! {
+            maybe_msg = rx.recv() => {
+                match maybe_msg {
+                    Some((venue, book)) => {
+                        aggregator.venues.insert(
+                            venue,
+                            VenueState {
+                                book,
+                                last_update: Instant::now(),
+                            },
+                        );
+
+                        let fresh = fresh_venues(&aggregator.venues, Instant::now());
+                        let summary = merge::merge(&fresh);
+                        if let Some(summary) = summary {
+                            // `send` only fails once every receiver has been
+                            // dropped — nothing left to publish to, not worth
+                            // logging or propagating.
+                            let _ = tx.send(Some(Arc::new(summary)));
+                        }
+                    }
+                    None => return,
+                }
+            }
+            _ = grace_check.tick() => {
+                if past_grace(started_at, Instant::now(), aggregator.venues.is_empty()) {
+                    error!(
+                        pair = %pair,
+                        "no data from any venue after {GRACE:?} — check the pair name"
+                    );
+                    return;
+                }
+            }
         }
     }
+}
+
+/// The pure decision behind piece 6: has the grace period elapsed with no
+/// venue ever having produced a book? Takes `now` and `venues_empty` as
+/// parameters, rather than reading `Instant::now()` or `self.venues`
+/// internally, so it's testable with a fixed clock and no async runtime.
+fn past_grace(started_at: Instant, now: Instant, venues_empty: bool) -> bool {
+    now.duration_since(started_at) > GRACE && venues_empty
 }
 
 /// Pre-filters `venues` down to the venues that are still fresh as of `now`,
@@ -143,5 +203,17 @@ mod tests {
 
         let fresh = fresh_venues(&venues, now);
         assert!(fresh.contains_key(&Venue::Binance));
+    }
+
+    /// Piece 6's core guarantee: an empty venue map past the grace period
+    /// must signal exit. Catches the silent-nothing-forever case — a bad
+    /// pair name (e.g. Bitstamp accepting `xyzabc` without validating it)
+    /// producing two permanently silent feeds and a process that never ends.
+    #[test]
+    fn empty_map_past_grace_exits() {
+        let started_at = Instant::now();
+        let now = started_at + GRACE + Duration::from_secs(1);
+
+        assert!(past_grace(started_at, now, true));
     }
 }

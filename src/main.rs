@@ -112,6 +112,7 @@ async fn main() -> Result<()> {
     // so the identity has to travel inside the result itself.
     let mut tasks: JoinSet<TaskResult> = JoinSet::new();
     let binance_pair = pair.clone();
+    let aggregator_pair = pair.clone();
     tasks.spawn(async move {
         let res = feed::run_feed(Binance, binance_pair, binance_tx).await;
         (Component::Feed(Venue::Binance), res)
@@ -121,7 +122,7 @@ async fn main() -> Result<()> {
         (Component::Feed(Venue::Bitstamp), res)
     });
     tasks.spawn(async move {
-        aggregator::run(feed_rx, tx).await;
+        aggregator::run(feed_rx, tx, aggregator_pair).await;
         (Component::Aggregator, Ok(()))
     });
     tasks.spawn(async move {
