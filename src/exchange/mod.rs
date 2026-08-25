@@ -124,4 +124,15 @@ mod tests {
             Venue::Bitstamp.staleness_threshold()
         );
     }
+
+    /// Bug this catches: `Venue`'s `Display` string ends up verbatim in the
+    /// wire `Level.exchange` field (see `src/merge.rs`). Nothing before this
+    /// asserted the exact casing — a `Display` change (e.g. `"Binance"`)
+    /// would compile cleanly and pass every other existing test while
+    /// silently changing what every gRPC client receives.
+    #[test]
+    fn venue_display_matches_the_wire_contracts_lowercase_strings() {
+        assert_eq!(Venue::Binance.to_string(), "binance");
+        assert_eq!(Venue::Bitstamp.to_string(), "bitstamp");
+    }
 }

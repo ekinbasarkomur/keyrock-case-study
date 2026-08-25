@@ -263,4 +263,5 @@ network); set `PROXY_HOST`/`PROXY_PORT` in `.env` if yours needs one too.
 | Reflection always on | Behind a config toggle |
 | `Level.exchange` allocates per level | Only matters if it shows up in a profile |
 | Venue health inferred client-side from which levels show up | Carry it on the wire — the fixed proto here has no health field, so a venue publishing normally but never making the top 10 looks identical to a genuinely stale one |
+| The parser doesn't validate price signs — it reports what the venue sent | A corrupted frame carrying a negative price would sort to the front of the book and propagate. Input validation belongs in a layer above the parser and isn't built here |
 

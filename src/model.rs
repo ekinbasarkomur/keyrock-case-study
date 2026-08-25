@@ -158,4 +158,20 @@ mod tests {
         assert!(!(a < b));
         assert!(!(b < a));
     }
+
+    /// A deliberate accept-and-document decision, not an oversight: `parse`
+    /// reads wire data and reports what the venue sent — it does not enforce
+    /// domain rules like "a price must be positive." No real market state
+    /// produces a negative price, so a corrupted frame carrying one would
+    /// sort to the front of the book and propagate all the way to gRPC
+    /// clients unfiltered; staleness doesn't catch this either, since the
+    /// venue is actively publishing, just publishing nonsense. Validation
+    /// against domain rules belongs a layer above the parser that doesn't
+    /// exist in this codebase today — see README.md's "What I'd change for
+    /// production" table. This test locks in the current, chosen behaviour
+    /// rather than leaving it an unverified assumption.
+    #[test]
+    fn a_negative_price_string_is_accepted_not_rejected() {
+        assert!(Price::parse("-0.001").is_some());
+    }
 }

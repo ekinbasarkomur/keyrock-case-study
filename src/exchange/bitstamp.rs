@@ -223,4 +223,35 @@ mod tests {
             .expect("bitstamp subscribes");
         assert!(msg.contains("order_book_ethbtc"));
     }
+
+    /// Bug this catches: none — this locks in already-correct behaviour
+    /// rather than fixing one, same as `binance.rs`'s equivalent test.
+    /// Bitstamp's `parse_levels` is its own independent copy of Binance's
+    /// (the source comment above calls it "a direct copy," not a shared
+    /// implementation), so a future refactor could regress one venue's
+    /// collect()-short-circuit without touching the other's — this is filed
+    /// per-exchange for that reason.
+    #[test]
+    fn one_malformed_bid_level_rejects_the_whole_message() {
+        let raw = r#"{"data":{"timestamp":"1","microtimestamp":"1","bids":[["0.03163789","3.42951262"],["not_a_number","1.00000000"]],"asks":[["0.03164587","0.61236387"]]},"channel":"order_book_ethbtc","event":"data"}"#;
+        assert!(
+            Bitstamp.parse(raw).is_none(),
+            "one unparseable level must reject the entire book, not produce a short one"
+        );
+    }
+
+    /// Bug this catches: an off-by-one or an `.unwrap()` on `.first()` in a
+    /// future change to `parse_levels` or its caller — would go unnoticed
+    /// until a real feed produced a genuinely one-sided book. Filed
+    /// per-exchange for the same reason as the test above: an independent
+    /// `parse_levels` copy per venue.
+    #[test]
+    fn empty_bids_side_parses_without_panicking() {
+        let raw = r#"{"data":{"timestamp":"1","microtimestamp":"1","bids":[],"asks":[["0.03164587","0.61236387"]]},"channel":"order_book_ethbtc","event":"data"}"#;
+        let book = Bitstamp
+            .parse(raw)
+            .expect("an empty side is still a valid book");
+        assert!(book.bids.is_empty());
+        assert_eq!(book.asks.len(), 1);
+    }
 }

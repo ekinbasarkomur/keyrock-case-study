@@ -165,4 +165,36 @@ mod tests {
     fn binance_subscribe_message_is_none() {
         assert_eq!(Binance.subscribe_message("ethbtc"), None);
     }
+
+    /// Bug this catches: none — this locks in already-correct behaviour
+    /// rather than fixing one. `parse_levels`'s `.collect()` into
+    /// `Option<Vec<_>>` already short-circuits on the first unparseable
+    /// level, so one bad level rejects the *whole* message via the `?` in
+    /// `parse()` — matching the brief's own stated preference ("a missing
+    /// tick is honest; staleness picks up the slack") over silently
+    /// publishing a 19-level book with a hole in it. Confirmed here rather
+    /// than left as an unverified reading of the code.
+    #[test]
+    fn one_malformed_bid_level_rejects_the_whole_message() {
+        let raw = r#"{"lastUpdateId":1,"bids":[["0.03144000","36.35500000"],["not_a_number","1.00000000"]],"asks":[["0.03145000","37.64560000"]]}"#;
+        assert!(
+            Binance.parse(raw).is_none(),
+            "one unparseable level must reject the entire book, not produce a short one"
+        );
+    }
+
+    /// Bug this catches: an off-by-one or an `.unwrap()` on `.first()` in a
+    /// future change to `parse_levels` or its caller — would go unnoticed
+    /// until a real feed produced a genuinely one-sided book. `"bids": []`
+    /// is legal JSON and a plausible message from a venue in a strange
+    /// state.
+    #[test]
+    fn empty_bids_side_parses_without_panicking() {
+        let raw = r#"{"lastUpdateId":1,"bids":[],"asks":[["0.03145000","37.64560000"]]}"#;
+        let book = Binance
+            .parse(raw)
+            .expect("an empty side is still a valid book");
+        assert!(book.bids.is_empty());
+        assert_eq!(book.asks.len(), 1);
+    }
 }
