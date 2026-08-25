@@ -54,11 +54,21 @@ async fn main() -> Result<()> {
     // to be observed, only the final sum after every task is stopped).
     let total_received = Arc::new(AtomicU64::new(0));
 
+    // Staggering the connects by a few ms each, rather than firing all
+    // `--clients` connection attempts inside the same tokio poll tick,
+    // matters in practice: a genuine instantaneous burst of hundreds of TCP
+    // connects against one address reliably tripped connection resets (seen
+    // live at 500 clients — most connections reset before the stream even
+    // opened) with the server's CPU staying near-idle throughout, which
+    // means it was measuring how the connect path handles a stampede, not
+    // the sustained per-subscriber load Piece 4 is actually after. Real
+    // subscribers also don't all dial in on the same tick.
     let mut tasks: JoinSet<()> = JoinSet::new();
     for client_id in 0..cli.clients {
         let addr = cli.addr.clone();
         let total_received = Arc::clone(&total_received);
         tasks.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5) * client_id as u32).await;
             if let Err(err) = subscribe_and_count(&addr, &total_received).await {
                 eprintln!("client {client_id}: connect/stream failed: {err:#}");
             }
