@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use hdrhistogram::Histogram;
 use tokio::sync::{mpsc, watch};
 use tracing::error;
 
@@ -34,6 +35,16 @@ const GRACE: Duration = Duration::from_secs(60);
 /// bug this polling interval exists to close.
 const GRACE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How often the periodic latency/throughput report (parse, merge+publish,
+/// and total span p50/p99/p99.9, sustained update rate, duplicate
+/// percentage) is logged. See `specs/011-measurement/spec.md`.
+const REPORT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Significant figures kept by each latency histogram. 3 is `hdrhistogram`'s
+/// own "if you're not sure, use 3" recommendation — plenty of resolution for
+/// logging p50/p99/p99.9 in whole microseconds off nanosecond samples.
+const HISTOGRAM_SIGFIG: u8 = 3;
+
 /// The last book received from one venue, plus when it arrived.
 struct VenueState {
     book: Book,
@@ -43,8 +54,57 @@ struct VenueState {
 /// Per-venue state the aggregator owns across the lifetime of the task. An
 /// empty map is the "nothing to publish yet" state — no venue has sent a
 /// message.
+///
+/// The three histograms, `update_count`, `duplicate_count`, and
+/// `last_published` are the latency/dedup instrumentation added in
+/// 011-measurement — same single-owner pattern as `venues`, no
+/// `Arc<Mutex<_>>`, since this task is still the only writer and reader.
 struct Aggregator {
     venues: BTreeMap<Venue, VenueState>,
+    /// `book.parsed_at - book.parse_started_at`, recorded for every received
+    /// book regardless of whether it's ultimately published.
+    parse_histogram: Histogram<u64>,
+    /// `published_at - book.parsed_at` — includes queueing behind other
+    /// `mpsc` messages and the `fresh_venues` staleness filter, not just
+    /// `merge()`'s own comparisons (see spec.md Piece 1). Recorded only when
+    /// a book actually reaches a `tx.send`.
+    merge_publish_histogram: Histogram<u64>,
+    /// `published_at - book.parse_started_at`, a fresh `Instant::now()` call
+    /// distinct from the one behind `merge_publish_histogram` — percentiles
+    /// aren't additive, so this is a real third measurement, not derived by
+    /// summing the other two.
+    total_histogram: Histogram<u64>,
+    /// How many books actually reached a `tx.send`.
+    update_count: u64,
+    /// How many of those sends carried a `Summary` identical to the
+    /// previously published one — measured unconditionally; whether this
+    /// number is ever acted on (skipping the send) is a later phase's job.
+    duplicate_count: u64,
+    /// The last merged `Summary`, updated on every merge regardless of
+    /// whether it was a duplicate — the comparison base for the next tick's
+    /// duplicate check, and the contract a later phase's dedup skip depends
+    /// on.
+    last_published: Option<Arc<Summary>>,
+}
+
+impl Aggregator {
+    fn new() -> Self {
+        Aggregator {
+            venues: BTreeMap::new(),
+            // `Histogram::new` auto-resizes as values arrive, so there's no
+            // upper bound to guess at construction time — a `expect` here is
+            // provably local (a constant, valid sigfig can't fail).
+            parse_histogram: Histogram::new(HISTOGRAM_SIGFIG)
+                .expect("HISTOGRAM_SIGFIG is a constant, in-range value"),
+            merge_publish_histogram: Histogram::new(HISTOGRAM_SIGFIG)
+                .expect("HISTOGRAM_SIGFIG is a constant, in-range value"),
+            total_histogram: Histogram::new(HISTOGRAM_SIGFIG)
+                .expect("HISTOGRAM_SIGFIG is a constant, in-range value"),
+            update_count: 0,
+            duplicate_count: 0,
+            last_published: None,
+        }
+    }
 }
 
 /// Receives `(Venue, Book)` pairs off the feed's `mpsc`, updates the
@@ -63,9 +123,7 @@ pub async fn run(
     tx: watch::Sender<Option<Arc<Summary>>>,
     pair: String,
 ) {
-    let mut aggregator = Aggregator {
-        venues: BTreeMap::new(),
-    };
+    let mut aggregator = Aggregator::new();
     let started_at = Instant::now();
 
     // A plain `while let Some(...) = rx.recv().await` loop can't notice time
@@ -77,27 +135,16 @@ pub async fn run(
     let mut grace_check = tokio::time::interval(GRACE_CHECK_INTERVAL);
     grace_check.tick().await; // first tick fires immediately; consume it up front
 
+    let mut report_tick = tokio::time::interval(REPORT_INTERVAL);
+    report_tick.tick().await; // first tick fires immediately; consume it up front
+    let mut update_count_at_last_report: u64 = 0;
+
     loop {
         tokio::select! {
             maybe_msg = rx.recv() => {
                 match maybe_msg {
                     Some((venue, book)) => {
-                        aggregator.venues.insert(
-                            venue,
-                            VenueState {
-                                book,
-                                last_update: Instant::now(),
-                            },
-                        );
-
-                        let fresh = fresh_venues(&aggregator.venues, Instant::now());
-                        let summary = merge::merge(&fresh);
-                        if let Some(summary) = summary {
-                            // `send` only fails once every receiver has been
-                            // dropped — nothing left to publish to, not worth
-                            // logging or propagating.
-                            let _ = tx.send(Some(Arc::new(summary)));
-                        }
+                        record_and_publish(&mut aggregator, venue, book, &tx, Instant::now());
                     }
                     None => return,
                 }
@@ -111,8 +158,133 @@ pub async fn run(
                     return;
                 }
             }
+            _ = report_tick.tick() => {
+                log_report(&aggregator, update_count_at_last_report, REPORT_INTERVAL);
+                update_count_at_last_report = aggregator.update_count;
+            }
         }
     }
+}
+
+/// Records a book's parse-span sample, updates the venue's state, merges,
+/// and — if the merge produces a `Summary` — compares it against the last
+/// published one (updating the duplicate counter and `last_published`
+/// either way), sends it, and records the merge+publish and total spans.
+///
+/// This is the exact `fresh_venues`/`merge::merge`/record sequence `run()`'s
+/// loop body performs, factored out so it's callable with a hand-picked
+/// `now` in tests — same reasoning as `fresh_venues` taking `now` as a
+/// parameter rather than calling `Instant::now()` internally.
+///
+/// A book that never gets published (filtered out by `fresh_venues` before
+/// reaching `merge`, or `merge` returns `None`) still contributes its
+/// parse-span sample — recorded unconditionally, before the venue state is
+/// even updated — but no sample to `merge_publish_histogram` or
+/// `total_histogram`, and no duplicate-count increment.
+fn record_and_publish(
+    aggregator: &mut Aggregator,
+    venue: Venue,
+    book: Book,
+    tx: &watch::Sender<Option<Arc<Summary>>>,
+    now: Instant,
+) {
+    record_duration(
+        &mut aggregator.parse_histogram,
+        book.parsed_at.duration_since(book.parse_started_at),
+        "parse span",
+    );
+    let parse_started_at = book.parse_started_at;
+    let parsed_at = book.parsed_at;
+
+    aggregator.venues.insert(
+        venue,
+        VenueState {
+            book,
+            last_update: now,
+        },
+    );
+
+    let fresh = fresh_venues(&aggregator.venues, now);
+    let Some(summary) = merge::merge(&fresh) else {
+        return;
+    };
+
+    // Compare against the merged Summary, not a per-venue lastUpdateId — a
+    // change 15 levels deep may not move the published top 10 (see spec.md
+    // Piece 2). `last_published` updates on every merge, duplicate or not,
+    // so the *next* comparison is always against the true last-merged
+    // state, not the last-*sent* one.
+    let is_duplicate = aggregator
+        .last_published
+        .as_deref()
+        .is_some_and(|last| *last == summary);
+    if is_duplicate {
+        aggregator.duplicate_count += 1;
+    }
+    let summary = Arc::new(summary);
+    aggregator.last_published = Some(Arc::clone(&summary));
+
+    // `send` only fails once every receiver has been dropped — nothing left
+    // to publish to, not worth logging or propagating. This phase measures
+    // duplicates only; no send is skipped on `is_duplicate` yet.
+    let _ = tx.send(Some(summary));
+
+    record_duration(
+        &mut aggregator.merge_publish_histogram,
+        Instant::now().duration_since(parsed_at),
+        "merge+publish span",
+    );
+    // A fresh `Instant::now()` call, not `parsed_at`'s or the merge+publish
+    // span's captured instant — percentiles aren't additive, so the total is
+    // its own real measurement (see spec.md Piece 1).
+    record_duration(
+        &mut aggregator.total_histogram,
+        Instant::now().duration_since(parse_started_at),
+        "total span",
+    );
+    aggregator.update_count += 1;
+}
+
+/// Records `duration` (as nanoseconds) into `histogram`, logging rather than
+/// silently swallowing the rare case `hdrhistogram` rejects a value (an
+/// auto-resizing histogram only fails this on a value that overflows its
+/// internal representation, not on ordinary latency samples).
+fn record_duration(histogram: &mut Histogram<u64>, duration: Duration, label: &str) {
+    if let Err(err) = histogram.record(duration.as_nanos() as u64) {
+        tracing::warn!(%err, label, "failed to record latency sample");
+    }
+}
+
+/// Logs the periodic latency/throughput report: p50/p99/p99.9 in
+/// microseconds for the total, parse, and merge+publish spans, the
+/// sustained update rate over the last `window`, and the running duplicate
+/// percentage (guarded against `update_count == 0`, which would otherwise
+/// divide by zero and log `NaN`).
+fn log_report(aggregator: &Aggregator, update_count_at_last_report: u64, window: Duration) {
+    let updates_this_window = aggregator.update_count - update_count_at_last_report;
+    let update_rate_per_sec = updates_this_window as f64 / window.as_secs_f64();
+    let duplicate_pct = if aggregator.update_count == 0 {
+        0.0
+    } else {
+        aggregator.duplicate_count as f64 / aggregator.update_count as f64 * 100.0
+    };
+
+    let us = |ns: u64| ns as f64 / 1_000.0;
+
+    tracing::info!(
+        total_p50_us = us(aggregator.total_histogram.value_at_quantile(0.50)),
+        total_p99_us = us(aggregator.total_histogram.value_at_quantile(0.99)),
+        total_p999_us = us(aggregator.total_histogram.value_at_quantile(0.999)),
+        parse_p50_us = us(aggregator.parse_histogram.value_at_quantile(0.50)),
+        parse_p99_us = us(aggregator.parse_histogram.value_at_quantile(0.99)),
+        parse_p999_us = us(aggregator.parse_histogram.value_at_quantile(0.999)),
+        merge_publish_p50_us = us(aggregator.merge_publish_histogram.value_at_quantile(0.50)),
+        merge_publish_p99_us = us(aggregator.merge_publish_histogram.value_at_quantile(0.99)),
+        merge_publish_p999_us = us(aggregator.merge_publish_histogram.value_at_quantile(0.999)),
+        update_rate_per_sec,
+        duplicate_pct,
+        "latency/throughput report"
+    );
 }
 
 /// The pure decision behind piece 6: has the grace period elapsed with no
@@ -164,6 +336,8 @@ mod tests {
                 Amount::parse("1.0").expect("valid literal"),
             )],
             last_update_id: 1,
+            parse_started_at: Instant::now(),
+            parsed_at: Instant::now(),
         }
     }
 
@@ -307,5 +481,138 @@ mod tests {
             BTreeSet::from(["bitstamp"]),
             "a stale Binance must not appear in the published Summary once it's excluded from the merge"
         );
+    }
+
+    /// A book that reaches a real `tx.send` records exactly one sample in
+    /// both the parse and merge+publish histograms (and the total
+    /// histogram), and its `Summary` is actually observable on the `watch`
+    /// channel — not just that the counters moved, but that the thing they
+    /// describe really happened.
+    #[tokio::test]
+    async fn a_published_book_records_both_parse_and_merge_publish_samples() {
+        let (tx, mut rx) = watch::channel::<Option<Arc<Summary>>>(None);
+        let mut aggregator = Aggregator::new();
+
+        let now = Instant::now();
+        let book = Book {
+            parse_started_at: now - Duration::from_micros(37),
+            parsed_at: now,
+            ..empty_book()
+        };
+
+        record_and_publish(&mut aggregator, Venue::Binance, book, &tx, now);
+
+        assert_eq!(aggregator.parse_histogram.len(), 1);
+        assert_eq!(aggregator.merge_publish_histogram.len(), 1);
+        assert_eq!(aggregator.total_histogram.len(), 1);
+        assert_eq!(aggregator.update_count, 1);
+        assert_eq!(aggregator.duplicate_count, 0);
+
+        rx.changed().await.expect("sender still alive");
+        assert!(
+            rx.borrow().is_some(),
+            "a Summary was actually published down the watch channel, not just counted"
+        );
+    }
+
+    /// A book that never gets published contributes its parse-span sample
+    /// (recorded unconditionally) but no sample to `merge_publish_histogram`
+    /// or `total_histogram`, and no duplicate-count increment.
+    ///
+    /// Note on why this isn't literally the `stale_venue_excluded_from_merge`
+    /// shape reused verbatim: `record_and_publish` always inserts the
+    /// venue/book it was just handed with `last_update: now` (the same `now`
+    /// it then filters with), so the venue *currently* producing a book can
+    /// never be excluded by its own staleness check — only some *other*,
+    /// non-updating venue can go stale. This test reproduces that other
+    /// venue (a stale Bitstamp entry, same fixture shape as the tests above)
+    /// alongside an incoming Binance book that is itself empty on both
+    /// sides, so `merge::merge` returns `None` once Bitstamp is filtered out
+    /// — the "merge::merge returns None" half of the contract documented on
+    /// `record_and_publish`, and the real way an incoming book ends up
+    /// unpublished in this design.
+    #[test]
+    fn a_stale_book_records_no_merge_publish_or_total_sample() {
+        let (tx, _rx) = watch::channel::<Option<Arc<Summary>>>(None);
+        let mut aggregator = Aggregator::new();
+
+        let now = Instant::now();
+        aggregator.venues.insert(
+            Venue::Bitstamp,
+            VenueState {
+                book: empty_book(),
+                // Bitstamp's threshold is 8s — 9s of silence is past it.
+                last_update: now - Duration::from_secs(9),
+            },
+        );
+
+        let unpublishable_book = Book {
+            bids: vec![],
+            asks: vec![],
+            last_update_id: 1,
+            parse_started_at: now - Duration::from_micros(50),
+            parsed_at: now,
+        };
+
+        record_and_publish(
+            &mut aggregator,
+            Venue::Binance,
+            unpublishable_book,
+            &tx,
+            now,
+        );
+
+        assert_eq!(
+            aggregator.parse_histogram.len(),
+            1,
+            "the parse span is recorded unconditionally, before merge is even attempted"
+        );
+        assert_eq!(aggregator.merge_publish_histogram.len(), 0);
+        assert_eq!(aggregator.total_histogram.len(), 0);
+        assert_eq!(aggregator.update_count, 0);
+        assert_eq!(aggregator.duplicate_count, 0);
+    }
+
+    /// The real precondition the duplicate counter's comparison depends on:
+    /// merging the same venues/book contents twice produces two `Summary`
+    /// values that compare equal via `Summary`'s derived `PartialEq` — not a
+    /// restatement of `prost`'s own derive, but confirmation that *this*
+    /// project's usage (parsed-through prices/amounts, spread rounded once
+    /// to the 8-decimal tick) never disagrees with itself between two
+    /// merges of identical input.
+    #[test]
+    fn two_structurally_identical_summaries_compare_equal() {
+        let binance = empty_book();
+        let bitstamp = empty_book();
+        let venues: BTreeMap<Venue, &Book> =
+            BTreeMap::from([(Venue::Binance, &binance), (Venue::Bitstamp, &bitstamp)]);
+
+        let first = merge::merge(&venues).expect("two live venues yield Some(summary)");
+        let second = merge::merge(&venues).expect("two live venues yield Some(summary)");
+
+        assert_eq!(first, second);
+    }
+
+    /// The other half of the same precondition: a genuinely different book
+    /// (one changed price) produces a `Summary` that compares unequal —
+    /// confirms the comparison isn't vacuously true (e.g. from a derive that
+    /// silently ignored a field).
+    #[test]
+    fn a_changed_book_produces_a_summary_that_compares_unequal() {
+        let binance = empty_book();
+        let bitstamp = empty_book();
+        let venues: BTreeMap<Venue, &Book> =
+            BTreeMap::from([(Venue::Binance, &binance), (Venue::Bitstamp, &bitstamp)]);
+        let before = merge::merge(&venues).expect("two live venues yield Some(summary)");
+
+        let mut changed_binance = empty_book();
+        changed_binance.bids[0].0 = Price::parse("1.5").expect("valid literal");
+        let venues: BTreeMap<Venue, &Book> = BTreeMap::from([
+            (Venue::Binance, &changed_binance),
+            (Venue::Bitstamp, &bitstamp),
+        ]);
+        let after = merge::merge(&venues).expect("two live venues yield Some(summary)");
+
+        assert_ne!(before, after);
     }
 }

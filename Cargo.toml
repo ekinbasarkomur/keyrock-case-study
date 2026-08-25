@@ -45,16 +45,14 @@ tonic-prost = "0.14.6"
 tonic-reflection = "0.14.6"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# Moved from [dev-dependencies] in 011-measurement: now backs production
+# latency instrumentation in src/aggregator.rs (parse/merge+publish/total
+# histograms), not just a bench — dev-dependencies aren't reachable from the
+# shipped binary.
+hdrhistogram = "7.6.0"
 
 [build-dependencies]
 tonic-prost-build = "0.14.6"
-
-[dev-dependencies]
-# Dev-only for now, but not permanently: step 8's latency instrumentation
-# will live in the running service (numbers from real feeds, not synthetic
-# input), not in a bench. When that lands, this moves to [dependencies] —
-# dev-dependencies aren't reachable from the shipped binary.
-hdrhistogram = "7.6.0"
 
 [profile.release]
 strip = true

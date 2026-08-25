@@ -67,6 +67,8 @@ impl Exchange for Binance {
     /// wasn't a book" a normal, expected outcome (see
     /// `specs/002-binance-feed/spec.md`, "Proposed Design").
     fn parse(&self, text: &str) -> Option<Book> {
+        let parse_started_at = std::time::Instant::now();
+
         let raw: Depth20 = match serde_json::from_str(text) {
             Ok(raw) => raw,
             Err(err) => {
@@ -82,6 +84,8 @@ impl Exchange for Binance {
             bids,
             asks,
             last_update_id: raw.last_update_id,
+            parse_started_at,
+            parsed_at: std::time::Instant::now(),
         })
     }
 }
