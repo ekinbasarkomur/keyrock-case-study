@@ -2,7 +2,7 @@
 spec_name: "Step 9 — measurement"
 spec_id: "011"
 spec_folder: "011-measurement"
-status: "draft"
+status: "approved"
 created_at: "2026-08-26"
 updated_at: "2026-08-26"
 created_by: "claude"
@@ -46,9 +46,12 @@ profile's `lto`/`codegen-units` settings are worth their build-time cost.
 - A prediction for p50 ingest-to-publish latency and which pipeline stage
   dominates it, written down in this spec before any instrumentation
   exists (see Prediction, below) — not written after the number is known.
-- Real ingest-to-publish latency instrumented via `hdrhistogram`,
-  reported as p50/p99/p99.9 plus the sustained update rate on a periodic
-  log line, with `merge()` staying pure (no clock reaches it).
+- Real ingest-to-publish latency instrumented via `hdrhistogram`, **split
+  into a parse span and a merge+publish span** so the prediction's claim
+  about which stage dominates is actually checkable, not just the total —
+  reported as p50/p99/p99.9 for both spans plus the sustained update rate
+  on a periodic log line, with `merge()` staying pure (no clock reaches
+  it).
 - The rate at which a freshly merged `Summary` is identical to the last
   one published, measured and acted on: dedup gets built only if the
   measured rate clears ~30%, and either way the number is reported.
@@ -157,13 +160,11 @@ Verified by reading the current source, not assumed:
 - `Cargo.toml`'s `[profile.release]` today has only `strip = true`.
 - `src/main.rs` spawns four tasks under one `JoinSet` today: two feeds,
   the aggregator, and the gRPC server (`server::router(rx).serve(addr)`).
-  There is no existing load-generation or benchmarking binary; `src/bin/`
-  does not exist yet in this crate (both `src/bin/aggregator.rs`'s rename
-  from `src/main.rs` and `src/bin/client.rs` from an earlier step's plan
-  never actually happened — `src/main.rs` is still the crate's one
-  binary, and the demo client landed as `src/bin/client.rs` in step 9's
-  predecessor, `008-client`, alongside it). Piece 4's load harness will be
-  the crate's second `src/bin/` binary.
+  It is still the crate's primary binary — the original plan's rename to
+  `src/bin/aggregator.rs` never happened. `src/bin/client.rs` does exist,
+  landed in `008-client` as the demo client. There is no load-generation
+  or benchmarking binary yet; Piece 4's `src/bin/loadtest.rs` will be the
+  second entry under `src/bin/`, alongside `client.rs`.
 - The README's "What I'd change for production" table and its "Behaviour
   under load" subsection (added in the immediately preceding
   documentation-only change, merged to `main`) already state, in an
@@ -225,34 +226,67 @@ dominating, or shows a p50 well outside 5-25µs in either direction, that
 contradicts this reasoning and is the more interesting result — worth
 writing up honestly rather than rationalized after the fact to fit.
 
+**This prediction names which stage dominates, so what gets measured has
+to be split the same way — a single total-latency number can't confirm or
+falsify it.** Piece 1, below, records two spans, not one: parse
+(`parsed_at - parse_started_at`) and everything after
+(`published_at - parsed_at`). The README line this makes possible is "I
+expected parsing to dominate. It did, at X% of p50" (or "it didn't") —
+not just a total with a story attached to it after the fact.
+
 ## Proposed Design
 
-### Piece 1 — ingest-to-publish latency
+### Piece 1 — ingest-to-publish latency, split into parse and merge+publish
 
-- Add `received_at: Instant` to `Book` (`src/model.rs`). Each
-  `Exchange::parse` implementation (`src/exchange/binance.rs`,
-  `src/exchange/bitstamp.rs`) stamps it with `Instant::now()` at the point
-  parsing succeeds — this is "ingest," the earliest moment a real book
-  exists in this process.
+Two timestamps thread through `Book`, not one, so the prediction's claim
+about which stage dominates is checkable rather than just the total:
+
+- Add `parse_started_at: Instant` and `parsed_at: Instant` to `Book`
+  (`src/model.rs`). Each `Exchange::parse` implementation
+  (`src/exchange/binance.rs`, `src/exchange/bitstamp.rs`) stamps
+  `parse_started_at` with `Instant::now()` at the very top of `parse` —
+  before `serde_json::from_str` runs — and stamps `parsed_at` once
+  parsing has actually succeeded, immediately before returning
+  `Some(Book { .. })`.
 - `src/aggregator.rs`'s `run()` loop, on each `Some((venue, book))`
-  received, records `Instant::now().duration_since(book.received_at)`
-  into an `hdrhistogram::Histogram` **after** `merge::merge()` returns
-  `Some` and the `watch::Sender::send` call happens — "publish" is the
-  point a fresh `Summary` actually reaches the channel, not merely the
-  point a message was received (a received message that gets filtered
-  out by staleness, or that merges into an unchanged `Summary` once
-  Piece 2 lands, was never actually published and must not be counted as
-  if it were).
-- The histogram, plus a running count of updates and (once Piece 2 lands)
-  a running count of `send`s skipped as duplicates, live as
+  received, records into **two** separate `hdrhistogram::Histogram`s:
+  - **parse span**: `book.parsed_at.duration_since(book.parse_started_at)`
+    — recorded as soon as the book is received, independent of whether it
+    ends up published.
+  - **merge+publish span**: `Instant::now().duration_since(book.parsed_at)`
+    — recorded **after** `merge::merge()` returns `Some` and the
+    `watch::Sender::send` call actually happens, matching Piece 1's
+    original "publish means it reached the channel" rule: a book that
+    gets filtered out by staleness, or (once Piece 2 lands) merges into
+    an unchanged `Summary` that gets skipped, was never actually
+    published and contributes no sample to this span.
+  - The **total** ingest-to-publish figure the README headlines is
+    `published_at - parse_started_at`, read directly off a third
+    timestamp taken at the same `send` call, not derived by adding the
+    two histograms' percentiles together — percentiles aren't additive
+    across independent distributions, so a real third measurement is the
+    only correct way to report a total p50/p99/p99.9.
+  - **What the merge+publish span actually covers, stated plainly in the
+    README next to the number**: not just `merge()`'s own comparisons —
+    it also includes the time the book spent sitting in the bounded
+    `mpsc` channel behind any other message ahead of it, and the
+    `fresh_venues` staleness filter. If this span comes out surprisingly
+    large, that's queueing or filtering, not `merge()` being slow — check
+    the update rate and channel depth before concluding anything about
+    merge's own cost, and say so in the README rather than mislabeling
+    the span as "merge time."
+- The three histograms, plus a running count of updates and (once Piece 2
+  lands) a running count of `send`s skipped as duplicates, live as
   `Aggregator`-owned state (same single-owner, no-`Arc<Mutex<_>>` pattern
   already used for `venues`) and get logged on a `tokio::time::interval`
-  tick roughly every 30s: p50, p99, p99.9 (all read from the histogram,
-  not recomputed by hand), the sustained update rate (`updates this
-  window / window duration`), and the dedup percentage (Piece 2).
+  tick roughly every 30s: p50/p99/p99.9 for total, parse, and
+  merge+publish (all read from the histograms, not recomputed by hand),
+  the sustained update rate (`updates this window / window duration`),
+  and the dedup percentage (Piece 2).
 - **`src/merge.rs` does not change.** No `Instant`, no clock, no new
-  parameter reaches `merge()` or `merge_side()` — the timestamp is read
-  and recorded entirely in `src/aggregator.rs`, before and after the
+  parameter reaches `merge()` or `merge_side()` — every timestamp is read
+  and recorded entirely in `src/exchange/*.rs` (the two parse stamps) and
+  `src/aggregator.rs` (the recording and the publish stamp), around the
   existing `merge::merge(&fresh)` call, exactly as `009-resilience`'s
   staleness filter already keeps the clock in `fresh_venues` and out of
   `merge()`. This is the single most load-bearing invariant in this
@@ -393,8 +427,9 @@ writing up honestly rather than rationalized after the fact to fit.
 
 ## Acceptance Criteria
 
-- A periodic (~30s) log line reporting p50, p99, p99.9 ingest-to-publish
-  latency, the sustained update rate, and the dedup percentage.
+- A periodic (~30s) log line reporting p50, p99, p99.9 for total
+  ingest-to-publish latency **and** the parse and merge+publish spans
+  separately, the sustained update rate, and the dedup percentage.
 - `hdrhistogram` is a `[dependencies]` entry, not `[dev-dependencies]`.
 - `git diff main --stat -- src/merge.rs` shows no diff at every phase of
   this packet.
@@ -404,7 +439,8 @@ writing up honestly rather than rationalized after the fact to fit.
   and 1000 subscribers.
 - The prediction (this spec) and the measured result (README) are both
   present, with the gap between them stated plainly — not silently
-  reconciled.
+  reconciled — including the specific parse-vs-rest percentage the
+  prediction named, not just the total.
 - The 24-hour run is started, with its start time recorded in the README,
   even if its full write-up lands as a follow-up.
 - `cargo build`, `cargo test`, `cargo clippy --all-targets -- -D
@@ -462,9 +498,12 @@ writing up honestly rather than rationalized after the fact to fit.
 
 Required real verification:
 
-- Piece 1: a unit test in `src/aggregator.rs` asserting that a `Book`
-  with a known `received_at` produces a recorded latency sample once
-  merged and published — using a hand-computed `Instant`, matching the
+- Piece 1: a unit test in `src/aggregator.rs` asserting that a `Book` with
+  known `parse_started_at`/`parsed_at` values produces a recorded sample
+  in **both** the parse histogram and the merge+publish histogram once
+  merged and published, and that a book which never gets published (e.g.
+  filtered out as stale) contributes to neither the merge+publish
+  histogram nor the total — using hand-computed `Instant`s, matching the
   file's existing "pass the clock in, don't call `Instant::now()`
   internally where testability requires it" pattern already used for
   `fresh_venues`/`past_grace`.
@@ -501,8 +540,9 @@ Optional supporting checks:
 
 ## Rollback Plan
 
-Pieces 1-3 are additive and independently revertible: the `received_at`
-field, the histogram, the dedup counter/skip, and the release-profile
+Pieces 1-3 are additive and independently revertible: the
+`parse_started_at`/`parsed_at` fields, the histograms, the dedup
+counter/skip, and the release-profile
 change each touch a small, separable surface (`src/model.rs`,
 `src/aggregator.rs`, `Cargo.toml`) and none changes the wire contract or
 `src/merge.rs`. Piece 4 is a new, optional binary with no effect on the
