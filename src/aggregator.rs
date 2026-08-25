@@ -74,11 +74,15 @@ struct Aggregator {
     /// aren't additive, so this is a real third measurement, not derived by
     /// summing the other two.
     total_histogram: Histogram<u64>,
-    /// How many books actually reached a `tx.send`.
+    /// How many merges actually reached a `tx.send` (i.e. produced a
+    /// `Summary` that differed from the last published one).
     update_count: u64,
-    /// How many of those sends carried a `Summary` identical to the
-    /// previously published one — measured unconditionally; whether this
-    /// number is ever acted on (skipping the send) is a later phase's job.
+    /// How many merges produced a `Summary` identical to the previously
+    /// published one and were skipped rather than sent (see the ~30%
+    /// measured threshold in `specs/011-measurement/spec.md` Piece 2).
+    /// `update_count + duplicate_count` is the true total merge count —
+    /// `update_count` alone no longer is, since a duplicate merge doesn't
+    /// increment it.
     duplicate_count: u64,
     /// The last merged `Summary`, updated on every merge regardless of
     /// whether it was a duplicate — the comparison base for the next tick's
@@ -168,19 +172,23 @@ pub async fn run(
 
 /// Records a book's parse-span sample, updates the venue's state, merges,
 /// and — if the merge produces a `Summary` — compares it against the last
-/// published one (updating the duplicate counter and `last_published`
-/// either way), sends it, and records the merge+publish and total spans.
+/// published one, updating the duplicate counter and `last_published`
+/// either way. A duplicate is **not** sent (see the ~30%-measured decision
+/// in `specs/011-measurement/spec.md` Piece 2); a genuine change is sent and
+/// its merge+publish/total spans are recorded.
 ///
 /// This is the exact `fresh_venues`/`merge::merge`/record sequence `run()`'s
 /// loop body performs, factored out so it's callable with a hand-picked
 /// `now` in tests — same reasoning as `fresh_venues` taking `now` as a
 /// parameter rather than calling `Instant::now()` internally.
 ///
-/// A book that never gets published (filtered out by `fresh_venues` before
-/// reaching `merge`, or `merge` returns `None`) still contributes its
-/// parse-span sample — recorded unconditionally, before the venue state is
-/// even updated — but no sample to `merge_publish_histogram` or
-/// `total_histogram`, and no duplicate-count increment.
+/// A book that never gets published — filtered out by `fresh_venues` before
+/// reaching `merge`, `merge` returns `None`, or the merged `Summary` is a
+/// duplicate of the last one — still contributes its parse-span sample
+/// (recorded unconditionally, before the venue state is even updated), but
+/// no sample to `merge_publish_histogram` or `total_histogram`: neither span
+/// describes work that led to an actual publish, and a duplicate's
+/// "publish" never happened at all.
 fn record_and_publish(
     aggregator: &mut Aggregator,
     venue: Venue,
@@ -218,15 +226,23 @@ fn record_and_publish(
         .last_published
         .as_deref()
         .is_some_and(|last| *last == summary);
-    if is_duplicate {
-        aggregator.duplicate_count += 1;
-    }
     let summary = Arc::new(summary);
     aggregator.last_published = Some(Arc::clone(&summary));
 
+    if is_duplicate {
+        // Measured at ~36-49% across debug and release runs against real
+        // Binance+Bitstamp connections — comfortably above the ~30%
+        // threshold spec.md set for actually implementing the skip (see
+        // specs/011-measurement/spec.md Piece 2 and README.md's
+        // Measurement section for the numbers). `last_published` was
+        // already updated above, so the *next* comparison is still against
+        // the true last-merged state, not the last-*sent* one.
+        aggregator.duplicate_count += 1;
+        return;
+    }
+
     // `send` only fails once every receiver has been dropped — nothing left
-    // to publish to, not worth logging or propagating. This phase measures
-    // duplicates only; no send is skipped on `is_duplicate` yet.
+    // to publish to, not worth logging or propagating.
     let _ = tx.send(Some(summary));
 
     record_duration(
@@ -257,16 +273,20 @@ fn record_duration(histogram: &mut Histogram<u64>, duration: Duration, label: &s
 
 /// Logs the periodic latency/throughput report: p50/p99/p99.9 in
 /// microseconds for the total, parse, and merge+publish spans, the
-/// sustained update rate over the last `window`, and the running duplicate
-/// percentage (guarded against `update_count == 0`, which would otherwise
-/// divide by zero and log `NaN`).
+/// sustained published-update rate over the last `window`, and the running
+/// duplicate percentage (guarded against a zero total-merge count, which
+/// would otherwise divide by zero and log `NaN`).
 fn log_report(aggregator: &Aggregator, update_count_at_last_report: u64, window: Duration) {
     let updates_this_window = aggregator.update_count - update_count_at_last_report;
     let update_rate_per_sec = updates_this_window as f64 / window.as_secs_f64();
-    let duplicate_pct = if aggregator.update_count == 0 {
+    // `update_count + duplicate_count` is the true total merge count — a
+    // duplicate no longer increments `update_count` now that it's skipped
+    // rather than sent (see `duplicate_count`'s doc comment).
+    let total_merges = aggregator.update_count + aggregator.duplicate_count;
+    let duplicate_pct = if total_merges == 0 {
         0.0
     } else {
-        aggregator.duplicate_count as f64 / aggregator.update_count as f64 * 100.0
+        aggregator.duplicate_count as f64 / total_merges as f64 * 100.0
     };
 
     let us = |ns: u64| ns as f64 / 1_000.0;
@@ -571,6 +591,60 @@ mod tests {
         assert_eq!(aggregator.total_histogram.len(), 0);
         assert_eq!(aggregator.update_count, 0);
         assert_eq!(aggregator.duplicate_count, 0);
+    }
+
+    /// The dedup decision itself (Piece 2, spec.md — implemented after the
+    /// measured duplicate rate came back at ~36-49%, comfortably above the
+    /// ~30% threshold): a merge producing a `Summary` identical to the last
+    /// one published is not sent. Publishes a book, reads it, then feeds a
+    /// second, merge-identical book and confirms the `watch` receiver never
+    /// wakes a second time within a short real-time window — the actual
+    /// behavior the decision put in place, not just that `duplicate_count`
+    /// moved. Reuses the interleaved-send-and-read discipline
+    /// `a_venue_going_stale_narrows_the_published_summary` establishes:
+    /// `watch` only ever holds the latest value, so the first send is read
+    /// before the second book is fed in, never batched.
+    #[tokio::test]
+    async fn an_unchanged_tick_is_not_resent_down_the_watch_channel() {
+        let (tx, mut rx) = watch::channel::<Option<Arc<Summary>>>(None);
+        let mut aggregator = Aggregator::new();
+
+        let now = Instant::now();
+        let first_book = Book {
+            parse_started_at: now - Duration::from_micros(10),
+            parsed_at: now,
+            ..empty_book()
+        };
+        record_and_publish(&mut aggregator, Venue::Binance, first_book, &tx, now);
+        rx.changed().await.expect("sender still alive");
+        assert!(rx.borrow().is_some(), "first Summary was published");
+
+        // Same venue, same bids/asks (empty_book()'s contents) — merge()
+        // reads only bids/asks, never the timestamp fields, so this second
+        // book merges to a Summary identical to the first despite the
+        // later `now2`.
+        let now2 = now + Duration::from_millis(100);
+        let second_book = Book {
+            parse_started_at: now2 - Duration::from_micros(10),
+            parsed_at: now2,
+            ..empty_book()
+        };
+        record_and_publish(&mut aggregator, Venue::Binance, second_book, &tx, now2);
+
+        assert_eq!(
+            aggregator.duplicate_count, 1,
+            "the second, identical merge must still be counted as a duplicate"
+        );
+        assert_eq!(
+            aggregator.update_count, 1,
+            "update_count must not increment for a skipped duplicate"
+        );
+
+        let woke_again = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
+        assert!(
+            woke_again.is_err(),
+            "a duplicate merge must not wake the watch receiver a second time"
+        );
     }
 
     /// The real precondition the duplicate counter's comparison depends on:
