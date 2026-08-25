@@ -31,6 +31,30 @@ impl fmt::Display for Venue {
     }
 }
 
+impl Venue {
+    /// `(capacity, tokens_per_second)` for this venue's reconnect token
+    /// bucket (`src/feed.rs`'s `TokenBucket`) — an absolute ceiling on
+    /// connection attempts, separate from and composed with the backoff
+    /// delay. Lives here, next to where `staleness_threshold` will land in
+    /// step 7's next piece, so every per-venue fact stays in one place and
+    /// both `match`es stay exhaustive.
+    pub fn connect_rate(self) -> (f64, f64) {
+        match self {
+            // Binance documents 300 connection attempts per 5 minutes per
+            // IP, i.e. one token per second on average. Capacity is
+            // deliberately small (5, not 300) — a capacity of 300 would let
+            // the very first burst spend the entire five-minute allowance in
+            // one go, which defeats the point of having a ceiling at all.
+            Venue::Binance => (5.0, 1.0),
+            // Bitstamp publishes no documented connection-rate limit. This
+            // is a conservative guess, not a real figure — half of
+            // Binance's refill rate and the same small capacity — stated
+            // here plainly rather than presented as fact.
+            Venue::Bitstamp => (5.0, 0.5),
+        }
+    }
+}
+
 /// What varies per venue, as data rather than control flow. Deliberately
 /// synchronous — an `async fn connect` per implementation would give each
 /// venue its own driver loop, and step 6's reconnection handling would then

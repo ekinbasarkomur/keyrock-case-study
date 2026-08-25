@@ -80,21 +80,85 @@ impl Backoff {
     }
 }
 
+/// An absolute per-venue ceiling on connection attempts, expressed as a
+/// classic token bucket: `capacity` tokens available at once, refilling at
+/// `refill_per_sec` tokens/sec, never exceeding `capacity`.
+///
+/// **What this is actually for.** Backoff (above) answers "when do I try
+/// next" — reactive, and already generous (1s/2s/4s/8s/16s/30s means a
+/// continuously-failing venue makes roughly 14 connection attempts in five
+/// minutes). The bucket answers a different question: "am I allowed to try
+/// at all," an absolute ceiling independent of whatever the backoff curve
+/// happens to produce. Binance documents a real limit (300 attempts / 5
+/// minutes); at 14 attempts/5min under normal backoff, that limit is
+/// essentially never reached — this bucket exists because there's a
+/// *documented* number worth expressing directly in code, not because
+/// backoff has been observed to be insufficient in practice. It composes
+/// with backoff (`backoff.wait()` then `bucket.acquire()` then `connect()`),
+/// it does not replace it.
+struct TokenBucket {
+    capacity: f64,
+    tokens: f64,
+    refill_per_sec: f64,
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    fn new(capacity: f64, refill_per_sec: f64) -> Self {
+        TokenBucket {
+            capacity,
+            tokens: capacity,
+            refill_per_sec,
+            last_refill: Instant::now(),
+        }
+    }
+
+    /// Adds tokens for the time elapsed since the last refill, capped at
+    /// `capacity` — a long idle period must not let a burst of attempts
+    /// through unthrottled. `now` is a parameter (not `Instant::now()`
+    /// internally) so this can be unit tested with a fixed/fake clock.
+    fn refill(&mut self, now: Instant) {
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+        self.last_refill = now;
+    }
+
+    /// Waits until a token is available, then spends it. Under normal
+    /// backoff cadence this returns immediately (the bucket rarely empties)
+    /// — see the type's doc comment for why that's the point, not a
+    /// coincidence.
+    async fn acquire(&mut self) {
+        loop {
+            self.refill(Instant::now());
+            if self.tokens >= 1.0 {
+                self.tokens -= 1.0;
+                return;
+            }
+            let deficit = 1.0 - self.tokens;
+            let wait = Duration::from_secs_f64(deficit / self.refill_per_sec);
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
 /// Connects to `exchange` for `pair`, reads frames, and sends each parsed
 /// [`Book`] down `tx`. Structurally identical to what `005-aggregator`'s
 /// `src/main.rs::run_feed` did by hand for Binance alone — this is that
 /// same loop, generalised over any `Exchange` implementation via `E`.
 ///
 /// As of step 7, this never returns except on panic: a closed socket or a
-/// failed connect attempt is followed by a jittered backoff wait, then
-/// another attempt, forever. See [`Backoff`] for the wait sequence and the
-/// stability-gated reset.
+/// failed connect attempt is followed by a jittered backoff wait, then a
+/// per-venue token-bucket check, then another attempt, forever. See
+/// [`Backoff`] for the wait sequence and the stability-gated reset, and
+/// [`TokenBucket`] for the absolute connection-rate ceiling.
 pub async fn run_feed<E: Exchange>(
     exchange: E,
     pair: String,
     tx: mpsc::Sender<(Venue, Book)>,
 ) -> Result<()> {
     let mut backoff = Backoff::new();
+    let (capacity, refill_per_sec) = exchange.venue().connect_rate();
+    let mut bucket = TokenBucket::new(capacity, refill_per_sec);
 
     loop {
         let (connected_at, result) = run_once(&exchange, &pair, &tx).await;
@@ -119,6 +183,13 @@ pub async fn run_feed<E: Exchange>(
         let wait = Backoff::jittered(backoff.next_delay());
         info!(venue = %exchange.venue(), wait_secs = wait.as_secs_f64(), "reconnecting after backoff");
         tokio::time::sleep(wait).await;
+
+        // backoff.wait() -> bucket.acquire() -> connect() (the connect
+        // attempt itself is the top of the next loop iteration). Under
+        // normal backoff cadence this returns immediately — see
+        // `TokenBucket`'s doc comment for why that's the design intent, not
+        // an accident.
+        bucket.acquire().await;
     }
 }
 
@@ -425,5 +496,44 @@ mod tests {
             saw_above_nominal,
             "never saw a jittered delay above nominal"
         );
+    }
+
+    /// Catches a limit that never actually applies: drain the bucket to
+    /// zero, advance a fake clock, and confirm tokens return proportional to
+    /// elapsed time at the configured refill rate — not stuck at zero
+    /// forever, and not jumping back to full immediately.
+    #[test]
+    fn bucket_empties_and_refills() {
+        let mut bucket = TokenBucket::new(5.0, 1.0); // capacity 5, 1 token/sec
+        let t0 = Instant::now();
+        bucket.last_refill = t0;
+
+        // Drain it to zero.
+        bucket.tokens = 0.0;
+
+        // 2.5 seconds later at 1 token/sec should refill 2.5 tokens.
+        bucket.refill(t0 + Duration::from_millis(2_500));
+        assert!(
+            (bucket.tokens - 2.5).abs() < 1e-9,
+            "expected ~2.5 tokens, got {}",
+            bucket.tokens
+        );
+    }
+
+    /// Catches a burst of many attempts after a long idle period slipping
+    /// through unthrottled: refilling for far longer than it would take to
+    /// reach capacity must still cap the token count at `capacity`, not
+    /// accumulate without bound.
+    #[test]
+    fn bucket_does_not_exceed_capacity() {
+        let mut bucket = TokenBucket::new(5.0, 1.0); // capacity 5, 1 token/sec
+        let t0 = Instant::now();
+        bucket.last_refill = t0;
+        bucket.tokens = 0.0;
+
+        // An hour is far more than enough to have refilled past capacity at
+        // 1 token/sec if nothing capped it.
+        bucket.refill(t0 + Duration::from_secs(3_600));
+        assert_eq!(bucket.tokens, 5.0);
     }
 }
