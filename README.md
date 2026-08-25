@@ -5,7 +5,7 @@ finished service connects to Binance and Bitstamp order-book websocket
 feeds, merges the two books for one traded pair, and streams the spread plus
 the top 10 bids/asks over gRPC (`proto/orderbook.proto`).
 
-**Steps 0-8 of an 11-step build order have landed.** Both feeds carry real
+**Steps 0-9 of an 11-step build order have landed.** Both feeds carry real
 market data into one aggregator task, which drives a real two-venue
 `merge()` and publishes into a `watch` channel that `src/server.rs` streams
 to gRPC clients on every change. **The gRPC output is a genuine combined
@@ -14,7 +14,9 @@ A terminal client (`cargo run --bin client`) renders that stream live with
 per-venue status (see [Client](#client)). Both feeds survive a disconnect
 indefinitely — backoff/jitter, a per-venue staleness filter, and a
 grace-period exit if neither venue ever produces data (see
-[Reconnection](#reconnection), [Staleness](#staleness)).
+[Reconnection](#reconnection), [Staleness](#staleness)). Ingest-to-publish
+latency, the top-ten dedup rate, and a subscriber load curve are all
+measured, not argued (see [Measurement](#measurement)).
 
 ## Build order
 
@@ -29,7 +31,7 @@ grace-period exit if neither venue ever produces data (see
 | 6 | The example client (`src/bin/client.rs`) | Done |
 | 7 | Reconnection + staleness handling | Done |
 | 8 | Composition/wiring tests (`specs/010-test-gaps`) | Done |
-| 9 | Latency measurement (p50/p99), written up here | Not started |
+| 9 | Latency measurement (p50/p99), written up here | Done |
 | 10 | README pass, final cleanup | Not started |
 
 The aggregator holds a `BTreeMap<Venue, VenueState>` rather than one field
@@ -52,8 +54,9 @@ cargo run --bin keyrock-case-study --   # defaults: --pair ethbtc --port 50051
 cargo run --bin keyrock-case-study -- --pair btcusd --port 12345
 ```
 
-`--bin` is required now that this crate builds two binaries — the server and
-`src/bin/client.rs` (see [Client](#client)).
+`--bin` is required now that this crate builds three binaries — the server,
+`src/bin/client.rs`, and `src/bin/loadtest.rs` (see [Client](#client),
+[Measurement](#measurement)).
 
 Runs four tasks under a `JoinSet`: both feeds (one generic `feed::run_feed<E>`
 loop drives both), the aggregator, and the gRPC server. A feed reconnects on
@@ -73,16 +76,15 @@ grpcurl -plaintext localhost:50051 list
 grpcurl -plaintext -max-time 3 localhost:50051 orderbook.OrderbookAggregator/BookSummary
 ```
 
-Output is a real, merged ETHBTC book — both `"binance"` and `"bitstamp"`
-levels appear in the same response, interleaved by price. Reflection is
-unconditionally enabled — convenient for a reviewer, not production-ready
-without a toggle.
+Output is a real, merged ETHBTC book — `"binance"` and `"bitstamp"` levels
+interleaved by price in the same response. Reflection is always on —
+convenient here, not production-ready without a toggle.
 
 ## Client
 
 `src/bin/client.rs` is a demonstration terminal viewer, not part of the
-service — a second binary that streams `BookSummary` and redraws the
-combined book in place (colourised when stdout is a terminal).
+service — streams `BookSummary` and redraws the combined book in place
+(colourised when stdout is a terminal).
 
 ```sh
 docker compose up -d              # server
@@ -91,9 +93,8 @@ docker compose run --rm client    # the book
 
 `docker compose run` attaches stdin/stdout to just that one service — no
 line prefix, no interleaving with `app`'s logs, which cursor-addressed
-redraw needs; `docker compose up` would multiplex both services' output and
-tear the redraw apart (why the service stays out of `up`'s default set,
-`profiles: ["demo"]` in `compose.yml`). Locally, without Docker:
+redraw needs (`up` would multiplex both services' output and tear it
+apart — why `client` sits behind `profiles: ["demo"]`). Without Docker:
 `cargo run --bin client -- --addr http://127.0.0.1:50051`.
 
 The header shows each venue's status: `binance ●` if in the most recent
@@ -144,30 +145,91 @@ ever produced data 60s after start, the process exits naming the pair —
 60s covers one full backoff cycle (`1+2+4+8+16+30=61s`), so a venue
 genuinely mid-reconnect isn't killed before a fair attempt.
 
+## Measurement
+
+Every latency/throughput claim elsewhere in this README was, until this
+step, a design argument, not a number. `src/aggregator.rs` now records
+three `hdrhistogram` spans around `merge::merge()`, logged every 30s; the
+numbers below are from real Binance+Bitstamp connections, not a synthetic
+benchmark.
+
+**Prediction, written down before any instrumentation existed:** p50
+5-25µs, parse dominant — reasoning was that parsing walks ~2KB of JSON and
+~80 float literals per message, while merge is ~20 `f64` comparisons.
+
+**Result: parse was the larger share, but the magnitude was wrong by well
+over an order of magnitude.** Debug build: total p50 ~510µs, parse ~55% of
+it. Release build: total p50 76-85µs (profile numbers below), parse ~48-51%
+of it. Neither span is allocation-bound as predicted — both are dominated by
+`tokio` task-wakeup and `mpsc` channel-handoff latency, which
+allocation-counting never accounted for. **Merge itself doesn't fill the
+merge+publish span** — that span also covers a book queueing behind another
+message and the staleness filter, not just `merge()`'s comparisons; the
+scheduling/queueing overhead is what actually fills most of it.
+
+**Ingest-to-publish is not wire latency.** Binance's `depth20` stream
+carries no event time; only Bitstamp's `microtimestamp` could measure
+exchange-to-us delay, and with no Binance counterpart, a cross-venue
+comparison on this metric would be misleading — none is reported.
+
+**Duplicate rate: 35-49% across five separate live windows** — clear of the
+~30% bar set for building the skip, so it's built: a merge is compared
+against the last *published* `Summary` (not `lastUpdateId` — a 15th-level
+change doesn't move the top ten) and an identical one isn't sent. Verified
+live: the published-update rate dropped from ~4-6/s to ~2.4-2.5/s once the
+skip landed.
+
+**Release profile — `lto = "fat"`, `codegen-units = 1`:** build time
+36.29s → 53.46s (+47%), live p50 85µs → 76µs (-11%), both from real 5-minute
+windows. `panic = "abort"` wasn't added — it would remove
+`JoinError::is_panic()`'s panic-vs-cancellation distinction the `JoinSet`
+supervisor depends on.
+
+**Load test (`cargo run --bin loadtest`)**, 60s each against the shipped
+Docker image, `docker stats` sampled every 5s:
+
+| Subscribers | Aggregate rate | CPU (avg, range) |
+| --- | --- | --- |
+| 100 | 298 msg/s | 1.5% (0.1-5.4%) |
+| 500 | 843 msg/s | 3.4% (0.1-7.5%) |
+| 1000 | 2519 msg/s | 11.1% (0.5-24.6%) |
+
+CPU stays low and roughly tracks subscriber count — order-of-magnitude
+consistent with the low-thousands-of-subscribers estimate this replaces,
+though noisy sample to sample on a shared VM, reported as observed rather
+than smoothed into a clean line. **A separate, unplanned finding:** an
+instantaneous burst of simultaneous connects (unstaggered) reset most
+connections at 500 clients while CPU stayed near-idle — a connect-path
+stampede, not the sustained load this measurement is after. Staggering
+connects 5ms apart removed the failures entirely; the table above is from
+the staggered runs.
+
+**24-hour run:** started after this section shipped, against the exact
+build these numbers came from — see the note at the end of this section
+once it's added, or treat its absence as still in progress.
+
 ## Design decisions
 
 - **`watch`, not `broadcast`.** A book summary is current market state, not
-  an event log (see [Behaviour under load](#what-id-change-for-production)
-  for the fan-out payoff this buys).
+  an event log — see [Behaviour under load](#what-id-change-for-production).
 - **`merge()` walks both venues' already-sorted sides with peekable
   cursors, not sort-the-concat** — "don't discard information you're
   handed," not a speed claim.
-- **`Price`/`Amount` are `f64` newtypes, not fixed-point.** Measured first —
-  two million ETHBTC price-pair samples showed no disagreement with an `f64`
+- **`Price`/`Amount` are `f64` newtypes, not fixed-point** — measured first,
+  two million ETHBTC price-pair samples showed no disagreement with `f64`
   at 8 decimals (`specs/002-binance-feed/revisions.md` entry 1). Kept: the
   newtype boundary and a total order (`Ord` via `total_cmp`). The spread,
-  the one computed value, is rounded to that same 8-decimal tick at the
-  boundary.
+  the one computed value, rounds to that same 8-decimal tick at the boundary.
 - **One `Exchange` trait, kept synchronous** — `async fn` in a trait can't
   be used behind `dyn Trait` anyway, and every call site is a concrete
   generic `E: Exchange`.
 - **Tie-break: equal price prefers the larger amount, same rule both
-  sides.** A `BTreeMap<Venue, _>` (not `HashMap`) makes a full price+amount
-  tie resolve deterministically to whichever venue sorts first (Binance).
-- **A crossed book publishes a negative spread on purpose** — not a bug.
-  Two independently-matched venues routinely cross even though one
-  exchange's own matching engine can't; a real (if fleeting) arbitrage
-  signal worth reporting honestly.
+  sides** — a `BTreeMap<Venue, _>` (not `HashMap`) makes a full tie resolve
+  deterministically to whichever venue sorts first (Binance).
+- **A crossed book publishes a negative spread on purpose**, not a bug —
+  two independently-matched venues routinely cross even though one
+  exchange's own matching engine can't; a real, if fleeting, arbitrage
+  signal.
 - **One process per pair** — `BookSummary` takes `Empty`, so a second pair
   means a second process.
 
@@ -175,28 +237,29 @@ genuinely mid-reconnect isn't killed before a fair attempt.
 
 ```
 .
-├── proto/orderbook.proto   gRPC schema, from the brief
+├── proto/orderbook.proto   gRPC schema
 ├── build.rs                compiles the proto
 ├── src/
-│   ├── config.rs           env-based configuration
-│   ├── telemetry.rs        tracing (logs to stderr)
+│   ├── config.rs           env config
+│   ├── telemetry.rs        tracing, stderr
 │   ├── model.rs            Price/Amount, Book
-│   ├── proxy.rs            HTTP(S)_PROXY CONNECT tunnel
+│   ├── proxy.rs            CONNECT tunnel
 │   ├── exchange/
 │   │   ├── mod.rs          Exchange trait, Venue
 │   │   ├── binance.rs      Binance impl
 │   │   └── bitstamp.rs     Bitstamp impl
-│   ├── feed.rs             generic run_feed<E> driver
-│   ├── merge.rs            pure merge: Side, merge_side, merge
-│   ├── aggregator.rs       per-venue state, publishes watch
-│   ├── server.rs           OrderbookAggregator gRPC service
-│   ├── main.rs             CLI entry, spawns the tasks
+│   ├── feed.rs             generic run_feed<E>
+│   ├── merge.rs            pure merge
+│   ├── aggregator.rs       state, publishes watch
+│   ├── server.rs           gRPC service
+│   ├── main.rs             CLI entry
 │   └── bin/
-│       └── client.rs       demo terminal viewer, second binary
+│       ├── client.rs       demo viewer
+│       └── loadtest.rs     load harness
 └── tests/
     ├── cli.rs              real binary
     ├── grpc.rs             real tonic client
-    └── feed.rs             run_feed against a local socket
+    └── feed.rs             run_feed, local socket
 ```
 
 Each file's own doc comment carries the detail this tree doesn't. The
@@ -206,8 +269,9 @@ crate, so `main.rs` logic isn't reachable from it.
 ## Configuration
 
 Every setting works from a CLI flag or a `KEYROCK_`-prefixed env var, both
-with defaults. Copy `.env.example` to `.env` to set them without exporting
-by hand.
+with defaults — copy `.env.example` to `.env` to set them without exporting
+by hand. A flag overrides its env var; an unparseable `KEYROCK_PORT` is a
+startup error.
 
 | Setting | Flag | Env var | Default |
 | --- | --- | --- | --- |
@@ -216,10 +280,9 @@ by hand.
 | Log level | — | `KEYROCK_LOG_LEVEL` | `info` (`RUST_LOG` wins if set) |
 | Host | — | `KEYROCK_HOST` | `127.0.0.1` (use `0.0.0.0` in a container) |
 
-A CLI flag overrides its env var; an unparseable `KEYROCK_PORT` is a startup
-error. If `HTTPS_PROXY`/`HTTP_PROXY` is set, both feeds tunnel through it
-via an HTTP `CONNECT` handshake (`compose.yml` builds this from
-`PROXY_HOST`/`PROXY_PORT` in `.env`); unset, behavior is unchanged.
+If `HTTPS_PROXY`/`HTTP_PROXY` is set, both feeds tunnel through it via HTTP
+`CONNECT` (`compose.yml` builds this from `PROXY_HOST`/`PROXY_PORT` in
+`.env`); unset, behavior is unchanged.
 
 ## Development
 
@@ -267,33 +330,17 @@ only exiting if neither venue has produced data after 60s (see
 
 ### Behaviour under load
 
-Load lands in three places; the design isolates two.
+A slow subscriber degrades only itself — `watch` holds only the latest
+value, so a caught-up client gets the current book, not a backlog
+(`broadcast` would grow memory or drop with `Lagged` instead). Feeds and
+the aggregator are unaffected by subscriber count. The one cost that scales
+with N is the per-subscriber clone+encode, measured at
+[Measurement](#measurement)'s load-test table — encoding once and handing
+out `Bytes` (table above) is the fix.
 
-A slow subscriber degrades only itself — `tonic` stops polling its
-backed-up stream, `watch` holds only the latest value, so a caught-up
-client gets the current book, not a backlog (`broadcast` would instead
-grow memory or drop it with `Lagged`). The aggregator and feeds are
-unaffected by subscriber count — `watch::send` doesn't block; clone/encode
-work happens per subscriber, in that subscriber's own task.
-
-What *does* scale with N is that encode: each subscriber gets its own deep
-clone and protobuf encode of identical bytes. Unmeasured, but roughly —
-20 publishes/s, microseconds each — saturates a core somewhere in the low
-thousands of subscribers. The only cost that grows with N, which is why
-encoding once and handing out `Bytes` (table above) is the first thing
-worth changing.
-
-**No connection limit.** Nothing caps concurrent gRPC connections — fine
-behind known consumers, not for a public deployment, since the encode
-cost is linear in N. `tower`'s concurrency-limit layer is the standard
-fix; not built because this isn't that kind of service.
-
-**Dedup isn't built yet, deliberately.** Binance publishes every 100ms
-regardless of change, so some ticks re-publish an identical top ten for
-no reason. Fix is two lines (keep the last `Summary`, skip an unchanged
-send) — also closer to the brief's "stream on every *change*" wording.
-Held back because how often the top ten repeats isn't measured, and this
-project avoids optimizing before measuring; lands with the latency work.
-Whoever builds it: compare the published `Summary`, not `lastUpdateId` —
-a venue's 15th level can change while the top ten doesn't.
+**No connection limit** — fine behind known consumers, not for a public
+deployment; `tower`'s concurrency-limit layer is the standard fix, not
+built because this isn't that kind of service. **Dedup is built** — the
+measured duplicate rate (35-49%, [Measurement](#measurement)) cleared the
+bar for building it.
 
