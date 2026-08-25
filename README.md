@@ -204,9 +204,17 @@ stampede, not the sustained load this measurement is after. Staggering
 connects 5ms apart removed the failures entirely; the table above is from
 the staggered runs.
 
-**24-hour run:** started after this section shipped, against the exact
-build these numbers came from — see the note at the end of this section
-once it's added, or treat its absence as still in progress.
+**24-hour run: started 2026-08-25T22:58:10Z**, commit `02754a4` (`docker
+compose up -d --build app`), so it exercises the shipped build rather than
+an intermediate one. Binance force-closes every connection at 24h,
+documented — this is the only thing that actually exercises the
+reconnection path against the condition it was built for; a proxy
+interruption lasting seconds, used everywhere else in this project's
+testing, doesn't. **Pending** — reconnect counts per venue, whether
+Binance's scheduled close shows up as one of them, p50/p99 drift from
+start to end, peak RSS, staleness-exclusion counts, and the full-run
+duplicate rate land here once the run completes; not reported before it
+does.
 
 ## Design decisions
 
