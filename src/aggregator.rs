@@ -145,6 +145,7 @@ fn fresh_venues(venues: &BTreeMap<Venue, VenueState>, now: Instant) -> BTreeMap<
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::time::Duration;
 
     use super::*;
@@ -215,5 +216,96 @@ mod tests {
         let now = started_at + GRACE + Duration::from_secs(1);
 
         assert!(past_grace(started_at, now, true));
+    }
+
+    /// Bug this catches: staleness filtering being correct in isolation
+    /// (as in the two tests above, which only assert on `fresh_venues`'s
+    /// return value) while never actually reaching what gets *published* —
+    /// e.g. a future refactor that calls `merge::merge` on the unfiltered
+    /// `venues` map by mistake instead of on `fresh_venues`'s output. Drives
+    /// the same `fresh_venues` + `merge::merge` sequence `run`'s loop body
+    /// performs, against a real `watch::channel`, with a hand-advanced clock
+    /// (see `fresh_venues`'s doc comment above for why `now` is a parameter
+    /// rather than `Instant::now()`) — `tokio::time::pause` isn't available
+    /// here (this crate's `tokio` dependency uses the `full` feature without
+    /// `test-util`).
+    ///
+    /// CAUTION, load-bearing: every `.send()` below is immediately followed
+    /// by a `.changed().await` before the next `.send()`. `watch` only ever
+    /// holds the *latest* value — batching two sends before the first read
+    /// would collapse them into one observable value, and the second read
+    /// would then hang forever waiting for a change that already happened.
+    /// This exact bug hit `005-aggregator`'s implementation for real (see
+    /// `specs/005-aggregator/revisions.md` entry 3).
+    #[tokio::test]
+    async fn a_venue_going_stale_narrows_the_published_summary() {
+        let (tx, mut rx) = watch::channel::<Option<Arc<Summary>>>(None);
+        let mut venues: BTreeMap<Venue, VenueState> = BTreeMap::new();
+
+        // Both venues report a book at the same instant.
+        let now0 = Instant::now();
+        venues.insert(
+            Venue::Binance,
+            VenueState {
+                book: empty_book(),
+                last_update: now0,
+            },
+        );
+        venues.insert(
+            Venue::Bitstamp,
+            VenueState {
+                book: empty_book(),
+                last_update: now0,
+            },
+        );
+
+        let fresh = fresh_venues(&venues, now0);
+        let summary =
+            merge::merge(&fresh).expect("both venues fresh, merge should produce a summary");
+        tx.send(Some(Arc::new(summary)))
+            .expect("receiver still alive");
+
+        rx.changed().await.expect("sender still alive");
+        let first = rx.borrow().clone().expect("a Summary was published");
+        let exchanges_in_first: BTreeSet<&str> = first
+            .bids
+            .iter()
+            .chain(first.asks.iter())
+            .map(|level| level.exchange.as_str())
+            .collect();
+        assert!(exchanges_in_first.contains("binance"));
+        assert!(exchanges_in_first.contains("bitstamp"));
+
+        // Advance the clock past Binance's 1.5s staleness threshold, but
+        // stay under Bitstamp's 8s one — and only refresh Bitstamp's
+        // last_update, mirroring "Bitstamp keeps publishing, Binance goes
+        // quiet."
+        let now1 = now0 + Duration::from_millis(1_600);
+        venues.insert(
+            Venue::Bitstamp,
+            VenueState {
+                book: empty_book(),
+                last_update: now1,
+            },
+        );
+
+        let fresh = fresh_venues(&venues, now1);
+        let summary = merge::merge(&fresh).expect("bitstamp alone should still merge");
+        tx.send(Some(Arc::new(summary)))
+            .expect("receiver still alive");
+
+        rx.changed().await.expect("sender still alive");
+        let second = rx.borrow().clone().expect("a second Summary was published");
+        let exchanges_in_second: BTreeSet<&str> = second
+            .bids
+            .iter()
+            .chain(second.asks.iter())
+            .map(|level| level.exchange.as_str())
+            .collect();
+        assert_eq!(
+            exchanges_in_second,
+            BTreeSet::from(["bitstamp"]),
+            "a stale Binance must not appear in the published Summary once it's excluded from the merge"
+        );
     }
 }
