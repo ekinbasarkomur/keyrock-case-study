@@ -21,6 +21,8 @@ related_paths:
   - "src/exchange/binance.rs"
   - "src/exchange/bitstamp.rs"
   - "tests/grpc.rs"
+  - "tests/feed.rs"
+  - "README.md"
 verification_level: "mixed"
 complexity: "small"
 ---
@@ -75,6 +77,9 @@ closes that specific gap rather than chasing a coverage percentage.
   tests 5 and 6 turn out to need once their current behavior is confirmed.
   Both were investigated before this spec was written (see Design) and both
   concluded "no change needed" — so in practice this step is test-code-only.
+  The one non-code addition is a `README.md` production-notes line
+  documenting the cost of test 6's accept decision (see Design, test 6) —
+  a doc change, not a behavior change.
 
 ## Current State
 
@@ -179,7 +184,16 @@ real socket close is not.
 
 **Test**: bind a local `TcpListener`, accept a connection and immediately
 close it, and assert `run_feed` comes back for another connection attempt
-(a second `accept()` on the same listener succeeds).
+(a second `accept()` on the same listener succeeds) — **and time the gap
+between the two `accept()` calls, asserting it's at least the first
+backoff delay.** Proving the loop retries at all is not enough: a loop that
+reconnected instantly in a tight spin would pass a retry-only assertion and
+would be a *worse* bug than not reconnecting — it's exactly the rate-limit
+failure pieces 3 and 4 of `009-resilience` (the stability-gated reset, the
+token bucket) exist to prevent. This makes the assertion "it retries after
+actually waiting," not just "it retries." Keep the bound one-sided (at
+least the first delay, no upper bound) so jitter and scheduler variance
+can't make the test flaky.
 
 Deliberately not done by abstracting `connect()` behind the `Exchange`
 trait to make it mockable — the trait describes protocol *data* (a URL, a
@@ -267,19 +281,37 @@ sign validation at all. A negative price string parses successfully,
 silently, today: not rejected, not a panic.
 
 **Decision (asked, not assumed): accept, and document as intentional.**
-This parsing layer handles wire data and is not the place to enforce
-business-domain semantics — a negative/crossed spread is already a
-documented, accepted outcome elsewhere in this project (the crossed-book
-design decision from step 5's `merge()`, which publishes a negative spread
-as-is rather than clamping it, because clamping would destroy real
-information). Rejecting a negative price at the parse boundary while
-accepting a negative *spread* one layer up would be an inconsistent halfway
-measure. No venue is expected to send a negative price in practice, but a
-corrupted frame or a proxy fault could, and a negative ask sorting to the
-front of the book has a larger blast radius than the input looks like it
-should — silently mishandling it either way (a debug assert that vanishes
-in release, a `saturating` clamp nobody chose deliberately) would be worse
-than the explicit "accept" documented here.
+A negative price and a negative spread are not the same kind of thing, and
+the crossed-book precedent does not actually justify this on its own — a
+negative spread is a *computed result* from two individually valid prices,
+a real market state (two venues with no shared matching engine, one's best
+ask below the other's best bid); it's information, and clamping it would
+destroy something true. A negative price is an *input*. No real market
+state produces one — it isn't information about the market, it's
+corruption. Rejecting the input while publishing the computed result is
+therefore consistent, not the inconsistent halfway measure it might look
+like at first glance.
+
+The actual reason to accept it: this parsing layer reads wire data and
+reports what the venue sent — it does not enforce domain rules. Validation
+against domain rules (price must be positive) belongs a layer above the
+parser, and no such layer exists in this codebase today. That absence is a
+deliberate scope decision for this step, not a consequence of the
+crossed-book design elsewhere — the two are unrelated design points that
+happen to both involve a sign.
+
+**What accepting it actually costs, stated plainly rather than left
+implicit:** a corrupted frame carrying a negative price sorts to the front
+of the book (it looks like the best available price) and propagates all
+the way to gRPC clients. Staleness does not catch this — the venue is
+actively publishing, just publishing nonsense, so nothing about its
+last-update timestamp looks wrong. "Accept" concretely means "a corrupted
+frame reaches clients unfiltered." This limitation must be added to the
+README's production-notes section as its own line, not left implicit:
+`The parser doesn't validate price signs — it reports what the venue sent.
+A corrupted frame carrying a negative price would sort to the front of the
+book and propagate. Input validation belongs in a layer above the parser
+and isn't built here.`
 
 **No production code change is needed.**
 
@@ -336,11 +368,9 @@ own independent `parse_levels`/`parse` — unit test in each of
   before either test was written — not discovered after the fact.
 - All eight tests exist, each with a doc comment or inline comment naming
   the bug it catches, matching the style of the existing 42.
-- Test count increases from 42 to 50 (assuming one test each for items 1-4,
-  6-7, and one test per exchange for items 5 and 8 — 4 + 1 + 1 + 2 + 2 = 10
-  is also an acceptable outcome if implementation finds a cleaner split;
-  the binding number is "eight numbered gaps closed," not an exact test
-  count).
+- The binding number is eight numbered gaps closed, not a specific test
+  count — tests 5 and 8 are each filed per-exchange (see Design), so the
+  actual count of new `#[test]` functions is naturally higher than eight.
 
 ## Invariants and Critical Don'ts
 
@@ -395,8 +425,10 @@ of tests):
   real `server::router`. Regression coverage for the `watch`-fan-out
   contract this project's architecture is built on.
 - Test 3 — `tests/feed.rs`: real local TCP listener, accept-then-close,
-  asserting `run_feed` reconnects rather than returning. Regression
-  coverage for reconnection's core premise.
+  asserting `run_feed` reconnects rather than returning, and that the gap
+  before the second `accept()` is at least the first backoff delay.
+  Regression coverage for reconnection's core premise *and* for a
+  tight-spin reconnect loop, which would be worse than not reconnecting.
 - Test 4 — `src/aggregator.rs` unit test: real `merge::merge` and a real
   `watch::channel`, driven with a hand-advanced clock, sends interleaved
   with reads. Regression coverage for staleness actually reaching the
