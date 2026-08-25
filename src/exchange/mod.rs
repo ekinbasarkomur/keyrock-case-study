@@ -17,7 +17,7 @@ pub mod bitstamp;
 /// the first variant — `BTreeMap<Venue, _>` iteration order (and this
 /// step's "first entry wins" `summarise` selection) depends on declaration
 /// order, not insertion order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Venue {
     Binance,
     Bitstamp,

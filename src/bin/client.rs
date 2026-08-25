@@ -10,6 +10,7 @@
 //! `src/lib.rs` already re-exports — no library change was needed to add
 //! this binary.
 
+use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -83,6 +84,54 @@ impl Stats {
     }
 }
 
+/// Client-side per-venue last-seen-in-a-frame tracking, used to render the
+/// header's `● ` / `○ stale <Ns>` status.
+///
+/// This is **not** the server's staleness state from step 7's aggregator
+/// (`src/aggregator.rs`'s `Venue::staleness_threshold`) — `Summary` carries
+/// no venue-health field, and the `.proto` stays untouched (see spec.md's
+/// Invariants), so the client can only infer health from which venues'
+/// levels actually show up in each streamed frame. The two numbers measure
+/// different events (server: last message *received* from the venue;
+/// client: last *frame* whose top-10 contained that venue's levels) and the
+/// client's figure therefore runs slightly behind the server's — by roughly
+/// one publish interval — not because either is wrong. See README's
+/// "Client-side status" note.
+struct VenueTracker {
+    last_seen: HashMap<Venue, Instant>,
+}
+
+impl VenueTracker {
+    /// Seeds every tracked venue with the current instant, so the header
+    /// prints a small, honest "stale 0.0s" rather than a special-cased blank
+    /// before the first frame arrives.
+    fn new(venues: &[Venue]) -> Self {
+        let now = Instant::now();
+        Self {
+            last_seen: venues.iter().map(|v| (*v, now)).collect(),
+        }
+    }
+
+    /// Records which of `venues` appear in `summary`'s levels this frame,
+    /// bumping their last-seen instant, and returns that set for the render
+    /// step to use for `●` vs `○`.
+    fn update(&mut self, venues: &[Venue], summary: &Summary) -> HashSet<Venue> {
+        let now = Instant::now();
+        let mut present = HashSet::new();
+        for level in summary.bids.iter().chain(summary.asks.iter()) {
+            for &v in venues {
+                if v.to_string() == level.exchange {
+                    present.insert(v);
+                }
+            }
+        }
+        for &v in &present {
+            self.last_seen.insert(v, now);
+        }
+        present
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -90,6 +139,7 @@ async fn main() -> Result<()> {
 
     let colour = std::io::stdout().is_terminal();
     let mut stats = Stats::new();
+    let mut tracker = VenueTracker::new(&VENUES);
 
     // Fixed one-second-delay reconnect loop — deliberately simpler than
     // step 7's feed backoff (exponential + jitter). This one loop covers
@@ -98,7 +148,7 @@ async fn main() -> Result<()> {
     // came back."
     let reconnect_loop = async {
         loop {
-            match connect_and_stream(&cli.addr, colour, &mut stats).await {
+            match connect_and_stream(&cli.addr, colour, &mut stats, &mut tracker).await {
                 Ok(()) => info!("stream ended, reconnecting"),
                 Err(e) => warn!(%e, "connect failed, retrying"),
             }
@@ -129,7 +179,12 @@ async fn main() -> Result<()> {
 /// Connects once, streams `Summary` messages until the stream ends or
 /// errors, rendering each one. Returns once the stream is exhausted (the
 /// caller's loop reconnects).
-async fn connect_and_stream(addr: &str, colour: bool, stats: &mut Stats) -> Result<()> {
+async fn connect_and_stream(
+    addr: &str,
+    colour: bool,
+    stats: &mut Stats,
+    tracker: &mut VenueTracker,
+) -> Result<()> {
     let mut client = OrderbookAggregatorClient::connect(addr.to_string()).await?;
     let mut stream = client.book_summary(Empty {}).await?.into_inner();
 
@@ -137,7 +192,8 @@ async fn connect_and_stream(addr: &str, colour: bool, stats: &mut Stats) -> Resu
     while let Some(summary) = stream.next().await {
         let summary = summary?;
         stats.record();
-        let frame = render(&VENUES, &summary, stats, colour);
+        let present = tracker.update(&VENUES, &summary);
+        let frame = render(&VENUES, tracker, &present, &summary, stats, colour);
         stdout.write_all(frame.as_bytes())?;
         stdout.flush()?;
     }
@@ -168,21 +224,33 @@ const TABLE_WIDTH: usize = 72;
 /// anywhere in it — that's what makes "pipe stdout to a file and see clean
 /// text" true.
 ///
-/// Takes `venues` as a slice rather than baking a fixed header string in,
-/// so step 7 can extend the header with per-venue status without changing
-/// this function's shape.
-fn render(venues: &[Venue], summary: &Summary, stats: &Stats, colour: bool) -> String {
+/// Takes `venues` as a slice, plus `tracker`/`present` for per-venue status
+/// (`●` for seen this frame, `○ stale <Ns>` otherwise) — step 7 fills in
+/// this field rather than restructuring the header, per the shape step 6
+/// set up for exactly this purpose.
+fn render(
+    venues: &[Venue],
+    tracker: &VenueTracker,
+    present: &HashSet<Venue>,
+    summary: &Summary,
+    stats: &Stats,
+    colour: bool,
+) -> String {
     let mut out = String::new();
     if colour {
         out.push_str("\x1b[H");
     }
 
-    let venue_names: Vec<String> = venues.iter().map(Venue::to_string).collect();
-
     border(&mut out, '┌', '┐');
+    // Padded manually rather than via `format!("{:<56}", ...)`: the status
+    // string can carry ANSI colour codes, and `format!`'s width padding
+    // counts raw bytes, which would misalign the border against a coloured
+    // cell the same way `row()`'s own `visible_len` helper exists to avoid.
+    let status = venue_status(venues, tracker, present, colour);
+    let pad = 56usize.saturating_sub(visible_len(&status));
     row(
         &mut out,
-        &format!("{:<56}{:>16}", venue_names.join(" + "), now_hms()),
+        &format!("{status}{}{:>16}", " ".repeat(pad), now_hms()),
     );
     border(&mut out, '├', '┤');
     row(&mut out, &format!("{:^35} {:^35}", "BIDS", "ASKS"));
@@ -397,6 +465,38 @@ fn now_hms() -> String {
         (secs / 60) % 60,
         secs % 60
     )
+}
+
+/// Renders each venue's status cell: `binance ●` (green) if its levels
+/// appeared in the most recent frame, `bitstamp ○ stale 4.2s` (red) if not,
+/// with the duration read from the client's own `tracker` — never from a
+/// server-side signal, since `Summary` carries no venue-health field.
+fn venue_status(
+    venues: &[Venue],
+    tracker: &VenueTracker,
+    present: &HashSet<Venue>,
+    colour: bool,
+) -> String {
+    let now = Instant::now();
+    venues
+        .iter()
+        .map(|v| {
+            if present.contains(v) {
+                colourize(&format!("{v} \u{25cf}"), "\x1b[32m", colour)
+            } else {
+                let elapsed = tracker
+                    .last_seen
+                    .get(v)
+                    .map_or(0.0, |t| now.duration_since(*t).as_secs_f64());
+                colourize(
+                    &format!("{v} \u{25cb} stale {elapsed:.1}s"),
+                    "\x1b[31m",
+                    colour,
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 fn colourize(text: &str, code: &str, colour: bool) -> String {
