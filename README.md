@@ -5,13 +5,16 @@ finished service connects to Binance and Bitstamp order-book websocket
 feeds, merges the two books for one traded pair, and streams the spread plus
 the top 10 bids/asks over gRPC (`proto/orderbook.proto`).
 
-**Steps 0-6 of an 11-step build order have landed.** Both feeds carry real
+**Steps 0-7 of an 11-step build order have landed.** Both feeds carry real
 market data into one aggregator task, which drives a real two-venue
 `merge()` and publishes into a `watch` channel that `src/server.rs` streams
 to gRPC clients on every change. **The gRPC output is a genuine combined
 book** — top 10 bids and asks across both venues, sorted and tie-broken.
-A terminal client (`cargo run --bin client`) renders that stream live (see
-[Client](#client)). No reconnection/staleness handling yet — that's step 7.
+A terminal client (`cargo run --bin client`) renders that stream live with
+per-venue status (see [Client](#client)). Both feeds now survive a
+disconnect indefinitely — backoff/jitter, a per-venue staleness filter, and
+a grace-period exit if neither venue ever produces data (see
+[Reconnection](#reconnection), [Staleness](#staleness)).
 
 ## Build order
 
@@ -24,7 +27,7 @@ A terminal client (`cargo run --bin client`) renders that stream live (see
 | 4 | Add the Bitstamp feed | Done |
 | 5 | Real `merge()` + top-10 + spread — the core deliverable | Done |
 | 6 | The example client (`src/bin/client.rs`) | Done |
-| 7 | Reconnection + staleness handling | Not started |
+| 7 | Reconnection + staleness handling | Done |
 | 8 | Remaining edge cases / tests | Not started |
 | 9 | Latency measurement (p50/p99), written up here | Not started |
 | 10 | README pass, final cleanup | Not started |
@@ -52,9 +55,11 @@ cargo run --bin keyrock-case-study -- --pair btcusd --port 12345
 `--bin` is required now that this crate builds two binaries — the server and
 `src/bin/client.rs` (see [Client](#client)).
 
-Runs four tasks under one `select!`: both feeds (one generic
-`feed::run_feed<E>` loop drives both), the aggregator, and the gRPC server.
-Exits the moment any one task ends. Logs go to stderr; stdout stays empty.
+Runs four tasks under a `JoinSet`: both feeds (one generic `feed::run_feed<E>`
+loop drives both), the aggregator, and the gRPC server. A feed no longer
+ends the process — it reconnects on its own (see
+[Reconnection](#reconnection)); the aggregator or server ending still does.
+Logs go to stderr; stdout stays empty.
 
 ## gRPC server
 
@@ -70,8 +75,8 @@ grpcurl -plaintext -max-time 3 localhost:50051 orderbook.OrderbookAggregator/Boo
 
 Output is a real, merged ETHBTC book — both `"binance"` and `"bitstamp"`
 levels appear in the same response, interleaved by price. Reflection is
-unconditionally enabled — convenient for a reviewer, not something
-production should ship without a toggle.
+unconditionally enabled — convenient for a reviewer, not production-ready
+without a toggle.
 
 ## Client
 
@@ -85,13 +90,61 @@ docker compose run --rm client    # the book
 ```
 
 `docker compose run` attaches stdin/stdout to just that one service — no
-line prefix, no interleaving with `app`'s logs — which is what
-cursor-addressed redraw needs. `docker compose up` would multiplex both
-services' output and prefix every line with the service name, tearing the
-redraw apart; that's a log-multiplexing problem, not a client bug, which is
-why the service stays out of `up`'s default set (`profiles: ["demo"]` in
+line prefix, no interleaving with `app`'s logs, which cursor-addressed
+redraw needs; `docker compose up` would multiplex both services' output and
+tear the redraw apart (a log-multiplexing problem, not a client bug — why
+the service stays out of `up`'s default set, `profiles: ["demo"]` in
 `compose.yml`). Locally, without Docker:
 `cargo run --bin client -- --addr http://127.0.0.1:50051`.
+
+The header shows each venue's status: `binance ●` if in the most recent
+frame, `binance ○ stale 4.2s` if not — inferred client-side from presence in
+the streamed levels (`Summary` has no health field), tracked as the
+client's own last-seen timestamp, **not** the server's staleness state
+([below](#staleness)): a different clock on a different event, so it runs a
+bit behind. Blind spot: a venue publishing normally but never making the
+top 10 looks identically stale.
+
+## Reconnection
+
+Both feeds loop inside `src/feed.rs` instead of returning on a closed
+socket — a disconnect is a certainty (Binance force-closes at 24h, Bitstamp
+can request one). Backoff: 1s/2s/4s/8s/16s, capped 30s, jittered
+`0.5x`-`1.5x` per wait, so a shared outage doesn't make every client retry
+in the same second and self-inflict a rate-limit hit.
+
+The backoff resets only once a connection has been **stable for 30s**, not
+the moment it connects — resetting on connect alone is the trap: a
+connection accepted and immediately dropped would reset every cycle,
+settling into one attempt per second forever, exactly Binance's
+300-per-5-minutes limit approached by a backoff that never actually
+engages.
+
+A per-venue token bucket composes with backoff as an absolute ceiling
+(backoff: *when*; bucket: *allowed at all*). Binance: capacity 5, refill 1
+token/s, from its documented 300-per-5-min limit. Bitstamp publishes no
+limit; capacity 5, refill 0.5/s is a stated guess, not fact. Invisible in
+normal operation — ~14 attempts per 5 minutes against Binance's 300.
+
+## Staleness
+
+A venue mid-reconnect still has its last book in the aggregator; merging it
+in would publish stale prices as live. Before every merge,
+`src/aggregator.rs` excludes any venue past its threshold. Binance: 1.5s —
+it pushes a snapshot every ~100ms regardless of change, so silence itself
+means dead. Bitstamp: **8s, measured live** (ETHBTC, ~5.25 min: 792
+messages, max gap 1.795s, median 0.213s) — it only publishes on change, so
+8s (~4x the observed max, rounded up for a short sample) avoids reading a
+quiet market as dead. If every venue is stale, nothing publishes;
+`merge()` itself never sees a clock — staleness is a pre-filter on its
+input, not logic inside it.
+
+**Grace period.** Bitstamp accepts any channel name unvalidated, so
+`--pair xyzabc` silently produces two connected feeds that never publish,
+with nothing distinguishing a bad pair from a quiet market. If no venue has
+ever produced data 60s after start, the process exits naming the pair —
+60s covers one full backoff cycle (`1+2+4+8+16+30=61s`), so a venue
+genuinely mid-reconnect isn't killed before a fair attempt.
 
 ## Design decisions
 
@@ -104,20 +157,18 @@ why the service stays out of `up`'s default set (`profiles: ["demo"]` in
 - **`Price`/`Amount` are `f64` newtypes, not fixed-point.** Measured first —
   two million ETHBTC price-pair samples showed no disagreement with an `f64`
   at 8 decimals (`specs/002-binance-feed/revisions.md` entry 1). Kept: the
-  newtype boundary and a total order (`Ord` via `total_cmp`). Dropped: the
-  integer domain. The one computed (not passed-through) value, the spread,
-  is rounded to that same 8-decimal tick at the boundary — a hardcoded
-  assumption, not derived per pair.
-- **One `Exchange` trait, kept synchronous** — introduced in step 4 once
-  there were two implementations to abstract over. `async fn` in a trait
-  can't be used behind `dyn Trait` anyway, and every call site is a concrete
+  newtype boundary and a total order (`Ord` via `total_cmp`). The spread,
+  the one computed value, is rounded to that same 8-decimal tick at the
+  boundary — a hardcoded assumption, not derived per pair.
+- **One `Exchange` trait, kept synchronous** — `async fn` in a trait can't
+  be used behind `dyn Trait` anyway, and every call site is a concrete
   generic `E: Exchange`.
 - **Tie-break: equal price prefers the larger amount, same rule both
   sides.** A `BTreeMap<Venue, _>` (not `HashMap`) makes a full price+amount
   tie resolve deterministically to whichever venue sorts first (Binance).
 - **A crossed book publishes a negative spread on purpose** — not a bug, not
   clamped. One exchange's own matching engine can't cross a trade, but two
-  independently-matched venues routinely can; that's a real (if fleeting)
+  independently-matched venues routinely can; a real (if fleeting)
   arbitrage signal worth reporting honestly.
 - **One process per pair** — `BookSummary` takes `Empty`, so a second pair
   means a second process.
@@ -151,7 +202,7 @@ why the service stays out of `up`'s default set (`profiles: ["demo"]` in
 
 Each file's own doc comment carries the detail this tree doesn't. The
 library/binary split is intentional: `tests/` can only import a library
-crate, so logic in `main.rs` wouldn't be reachable from it.
+crate, so logic in `main.rs` isn't reachable from it.
 
 ## Configuration
 
@@ -166,12 +217,10 @@ by hand.
 | Log level | — | `KEYROCK_LOG_LEVEL` | `info` (`RUST_LOG` wins if set) |
 | Host | — | `KEYROCK_HOST` | `127.0.0.1` (use `0.0.0.0` in a container) |
 
-A CLI flag overrides its matching env var. An unparseable `KEYROCK_PORT` is a
-startup error.
-
-If `HTTPS_PROXY`/`HTTP_PROXY` is set, both feeds tunnel through it via an
-HTTP `CONNECT` handshake — `compose.yml` builds this from `PROXY_HOST`/
-`PROXY_PORT` in `.env`. Unset, behavior is unchanged.
+A CLI flag overrides its matching env var; an unparseable `KEYROCK_PORT` is a
+startup error. If `HTTPS_PROXY`/`HTTP_PROXY` is set, both feeds tunnel
+through it via an HTTP `CONNECT` handshake — `compose.yml` builds this from
+`PROXY_HOST`/`PROXY_PORT` in `.env`. Unset, behavior is unchanged.
 
 ## Development
 
@@ -191,19 +240,18 @@ docker compose run --rm client          # the demo viewer — see Client above
 
 Two services, one image: `app` (the server) and `client` (the demo viewer,
 sharing `app`'s image via `image:` rather than rebuilding). `client` sits
-behind `profiles: ["demo"]`, so `docker compose up` starts only `app` —
-`client` is defined but dormant until asked for with `run`. See
+behind `profiles: ["demo"]`, so `docker compose up` starts only `app`. See
 [Client](#client) for why.
 
 Two-stage build (`rust:1.97-slim-bookworm` → `debian:bookworm-slim`
 non-root), no `ca-certificates` needed (`rustls-tls-webpki-roots` bundles its
 own roots). Binds `0.0.0.0` internally, publishes `127.0.0.1:50051`,
-loopback only. **If the container can't reach Binance and no proxy is
-configured, it exits shortly after starting** — `select!`'s supervision
-working as designed: a dead feed task ends the whole process rather than
-serving stale data. Development here runs through a CONNECT proxy (Binance
-is unreachable from the author's network); set `PROXY_HOST`/`PROXY_PORT` in
-`.env` if yours needs one too.
+loopback only. **The container no longer exits just because a venue is
+unreachable** — it reconnects with backoff instead (see
+[Reconnection](#reconnection)), only exiting if the pair has produced no
+data from *either* venue after 60s (see [Staleness](#staleness)). Development
+here runs through a CONNECT proxy (Binance is unreachable from the author's
+network); set `PROXY_HOST`/`PROXY_PORT` in `.env` if yours needs one too.
 
 ## What I'd change for production
 
@@ -214,4 +262,5 @@ is unreachable from the author's network); set `PROXY_HOST`/`PROXY_PORT` in
 | `merge()` returns the proto types | An internal type, once there's a second consumer |
 | Reflection always on | Behind a config toggle |
 | `Level.exchange` allocates per level | Only matters if it shows up in a profile |
+| Venue health inferred client-side from which levels show up | Carry it on the wire — the fixed proto here has no health field, so a venue publishing normally but never making the top 10 looks identical to a genuinely stale one |
 

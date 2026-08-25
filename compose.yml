@@ -44,10 +44,13 @@ services:
     # Compose's default project network: nothing external to create first,
     # so the repo runs with no manual setup.
 
-    # Expected, not a defect: on a network the container can't reach Binance
-    # from (directly or via the PROXY_HOST/PROXY_PORT pass-through above),
-    # the container exits shortly after starting — the three-task select!
-    # in main.rs ends the whole process the instant the feed task ends.
+    # If the container can't reach a venue (directly or via the
+    # PROXY_HOST/PROXY_PORT pass-through above), it no longer exits — each
+    # feed reconnects indefinitely with backoff/jitter (src/feed.rs) and a
+    # stale venue is filtered out of the merged book (src/aggregator.rs).
+    # The container only exits if the configured pair has produced no data
+    # from either venue within 60s of startup (README's "Staleness" section)
+    # — check the pair name in that case, not the network.
 
   # Demonstration client, not part of the service. Shares the image `app`
   # builds (`image:`, not `build:`) rather than rebuilding it, and overrides
