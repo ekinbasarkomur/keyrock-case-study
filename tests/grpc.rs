@@ -152,3 +152,97 @@ async fn book_summary_streams_multiple_updates_not_a_single_shot_response() {
         );
     }
 }
+
+/// Bug this catches: a `BookSummary` implementation that moves the shared
+/// `watch::Receiver` into each call instead of cloning it (or that hands
+/// every caller the exact same `Receiver`) — either would work perfectly
+/// against a single client (the only case every other test here exercises)
+/// and break silently the moment a second client subscribes. `watch` over
+/// `broadcast` is this project's fan-out design, and nothing before this
+/// test actually drove it with more than one subscriber.
+///
+/// Connects two independent clients against the same server, confirms both
+/// receive the first published `Summary`, drops one client's stream, and
+/// confirms the survivor still receives a second, later publish — proving
+/// the aggregator's fan-out to the remaining subscriber wasn't broken by the
+/// other one leaving.
+#[tokio::test]
+async fn a_second_client_keeps_streaming_after_the_first_one_leaves() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("binding to an OS-assigned port cannot fail");
+    let addr = listener
+        .local_addr()
+        .expect("a bound listener always has a local address");
+
+    let (tx, rx) = watch::channel::<Option<Arc<Summary>>>(None);
+    let (feed_tx, feed_rx) = mpsc::channel::<(Venue, Book)>(32);
+    tokio::spawn(aggregator::run(feed_rx, tx, "ethbtc".to_string()));
+
+    feed_tx
+        .send((Venue::Binance, book_with_offset(0.0)))
+        .await
+        .expect("aggregator's receiver is still alive");
+
+    tokio::spawn(async move {
+        server::router(rx)
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+    });
+
+    let mut client_a = OrderbookAggregatorClient::connect(format!("http://{addr}"))
+        .await
+        .expect("server task is already spawned and listening on this address");
+    let mut client_b = OrderbookAggregatorClient::connect(format!("http://{addr}"))
+        .await
+        .expect("a second independent connection to the same server should succeed");
+
+    let mut stream_a = client_a
+        .book_summary(Empty {})
+        .await
+        .expect("BookSummary call should succeed against a live server")
+        .into_inner();
+    let mut stream_b = client_b
+        .book_summary(Empty {})
+        .await
+        .expect("BookSummary call should succeed against a live server")
+        .into_inner();
+
+    // Both clients must see the value already published before either
+    // subscribed — `WatchStream` yields the current value on first poll.
+    stream_a
+        .message()
+        .await
+        .expect("stream should not error")
+        .expect("client A should receive the first Summary");
+    stream_b
+        .message()
+        .await
+        .expect("stream should not error")
+        .expect("client B should receive the first Summary");
+
+    // Client A leaves — drop its stream (and the underlying gRPC
+    // connection). Client B must be unaffected.
+    drop(stream_a);
+    drop(client_a);
+
+    // Give the server a moment to notice the dropped connection before
+    // publishing the next update, so a broken fan-out (one that somehow ties
+    // the survivor's delivery to the leaver) has a real chance to show up
+    // rather than racing past it.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    feed_tx
+        .send((Venue::Binance, book_with_offset(1.0)))
+        .await
+        .expect("aggregator's receiver is still alive");
+
+    let second = stream_b
+        .message()
+        .await
+        .expect("stream should not error")
+        .expect("client B should still receive a second Summary after client A left");
+
+    assert_eq!(second.bids.len(), 10);
+    assert_eq!(second.asks.len(), 10);
+}
