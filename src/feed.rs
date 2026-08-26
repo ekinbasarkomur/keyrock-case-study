@@ -270,11 +270,51 @@ async fn run_once_inner<E: Exchange>(
 
     // Single `next()` loop over the bidirectional stream — no `.split()`.
     // The subscribe write above happens once, before this loop starts, so
-    // read and write never overlap; `split()` would cost a mutex on the
-    // shared socket for nothing. It would matter if we sent periodic pings
-    // ourselves or subscribed dynamically at runtime — we don't;
-    // `tungstenite` already answers pings automatically.
-    while let Some(message) = ws.next().await {
+    // read and write never overlap (except for Kraken's idle ping below,
+    // which only ever fires between reads, never concurrently with one);
+    // `split()` would cost a mutex on the shared socket for nothing.
+    // `tungstenite` already answers protocol-level pings automatically for
+    // every venue — Kraken's requirement below is a separate,
+    // application-level `{"method":"ping"}` message, not a protocol frame.
+    //
+    // Research-only (012-kraken, not merged into main): Kraken's docs ask
+    // the client to send a ping at least every 60s if the connection is
+    // otherwise idle — the opposite direction from Binance (server pings
+    // the client; `tungstenite` already auto-answers that) and unlike
+    // Bitstamp (no documented ping requirement at all). `kraken_idle_ping`
+    // is `Some(threshold)` only for a Kraken connection, comfortably under
+    // the documented 60s — everything below is byte-for-byte the same
+    // `ws.next().await` call and loop body for every other venue, just
+    // reached through the `None` arm instead of always inline, so
+    // Binance/Bitstamp's read path has no behavioral change.
+    let kraken_idle_ping = (exchange.venue() == Venue::Kraken).then_some(Duration::from_secs(30));
+
+    loop {
+        let message = match kraken_idle_ping {
+            Some(idle) => match tokio::time::timeout(idle, ws.next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    debug!(
+                        venue = %exchange.venue(),
+                        idle_secs = idle.as_secs(),
+                        "idle past threshold, sending client-initiated ping"
+                    );
+                    ws.send(Message::Text(r#"{"method":"ping"}"#.into()))
+                        .await
+                        .map_err(|e| {
+                            (
+                                Some(connected_at),
+                                anyhow::Error::from(e).context("failed to send kraken idle ping"),
+                            )
+                        })?;
+                    continue;
+                }
+            },
+            None => ws.next().await,
+        };
+        let Some(message) = message else {
+            break;
+        };
         let message = message.map_err(|e| {
             (
                 Some(connected_at),
