@@ -510,17 +510,30 @@ implementation just as hard as an unresolved choice would.
 4. **Client-side ping: build proactive handling.** See "Decided — the
    three smaller Open Questions" above.
 
+### Resolved by live capture (2026-08-26)
+
+5. **Price/qty representation: bare JSON floats, confirmed.** Connected
+   live to `wss://ws.kraken.com/v2` (via this project's HTTP CONNECT proxy)
+   and subscribed to the `book` channel for `ETH/BTC`. A real captured
+   snapshot: `{"price":0.031348,"qty":0.03740000}` — no quotes. A real
+   captured update: `{"price":0.031347,"qty":0.00000000}` — same, and
+   confirms `qty: 0` (unquoted zero) is the real remove-this-level signal,
+   not a string `"0"` or `"0.00000000"`. The checksum guide's string
+   example was that guide's own illustrative formatting for explaining the
+   digit-stripping algorithm, not the wire format. `kraken.rs`'s struct
+   shape is therefore `Vec<Level<'a>>` with typed `f64` `price`/`qty`
+   fields (via `serde`'s numeric deserialization), not a borrowed
+   `Vec<[&str; 2]>` the way Binance/Bitstamp's levels are — the one place
+   Kraken's parsing shape genuinely differs from the other two venues'.
+   Also confirmed live in the same session: `status` arrives once,
+   immediately after connecting (`{"channel":"status","type":"update",
+   "data":[{"version":"2.0.10","system":"online","api_version":"v2",
+   "connection_id":...}]}`), the subscribe ack arrives before the
+   snapshot, and `heartbeat` is exactly `{"channel":"heartbeat"}` with no
+   other fields — all matching the docs research, no surprises there.
+
 ### Still open — need a real capture/measurement, not a decision
 
-5. **Price/qty representation: bare JSON floats or decimal strings?**
-   Kraken's own docs disagree with themselves (the `book` channel reference
-   types them as `float` with numeric examples; the checksum guide shows
-   string examples and explicitly recommends a decimal/string decoder).
-   Not resolvable from docs alone, and not something a human can just pick
-   — `kraken.rs`'s struct shape (`Vec<[&str; 2]>` vs. `Vec<Level<'a>>` with
-   typed `f64` fields) has to match what Kraken's server actually sends.
-   Resolved by capturing a real message during implementation, the same
-   way `bitstamp.rs`'s fixture was captured before it was written.
 6. **What is Kraken's actual staleness threshold?** Must be measured live
    against a real connection, the same discipline used for Bitstamp's 8s
    figure (`specs/006-bitstamp/`) — no number is proposed here since none
