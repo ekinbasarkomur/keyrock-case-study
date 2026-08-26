@@ -17,7 +17,7 @@
 //!
 //! # `parse` is order-dependent — unlike Binance/Bitstamp
 //!
-//! `Kraken::parse` accumulates state in a `RefCell` across calls. Calling it
+//! `Kraken::parse` accumulates state in a `Mutex` across calls. Calling it
 //! twice with the *same* `update` message silently double-applies that
 //! delta (removed levels stay removed either way, but a changed level's
 //! price/qty would be re-applied idempotently only by coincidence — nothing
@@ -28,7 +28,7 @@
 //! `calling_parse_twice_with_the_same_update_double_applies_the_delta`
 //! below for the concrete evidence.
 
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -41,9 +41,15 @@ use crate::model::{Amount, Book, Price};
 /// Unlike `Binance`/`Bitstamp` (both unit structs — every message is a
 /// complete, self-contained book), `Kraken` carries interior-mutable state:
 /// the last-known accumulated book, rebuilt wholesale by each `snapshot` and
-/// patched by each `update`. `RefCell`, not `Mutex` — nothing here is
-/// genuinely concurrent; one `&Kraken` is held for the duration of a single
-/// `run_once` call in `src/feed.rs`.
+/// patched by each `update`. `std::sync::Mutex`, not `RefCell` — `RefCell`
+/// is `!Sync`, which makes any future holding a `&Kraken` across an `.await`
+/// point `!Send`, and `tokio::task::JoinSet::spawn` requires `Send` futures
+/// (confirmed by a real crate-wide `cargo build` failure with `RefCell`, not
+/// assumed). Nothing here is genuinely *concurrent* — one `&Kraken` is held
+/// for the duration of a single `run_once` call in `src/feed.rs`, never
+/// accessed from two tasks at once — so the `Mutex` never actually
+/// contends; it exists to satisfy the `Send` bound, not for real mutual
+/// exclusion.
 ///
 /// # Reconnect-state handling
 ///
@@ -51,7 +57,7 @@ use crate::model::{Amount, Book, Price};
 /// `run_once<E>(exchange: &E, ...)`, and reconnects by looping and re-
 /// entering `run_once_inner` with the *same* `&E` — it does not construct a
 /// fresh `E` per reconnect attempt. That means one `Kraken` value (and one
-/// `RefCell`) is genuinely reused across every reconnect within a single
+/// `Mutex`) is genuinely reused across every reconnect within a single
 /// `run_feed` call, so "the next snapshot will just overwrite the cell" is
 /// not automatically safe on its own: if `parse` were ever called with an
 /// `update` message before the first post-reconnect `snapshot` arrived, a
@@ -67,13 +73,13 @@ use crate::model::{Amount, Book, Price};
 /// with leftover expectations (e.g. retrying a stale buffered message after
 /// reconnecting), this comment is the place to revisit.
 pub struct Kraken {
-    book: RefCell<Option<KrakenBook>>,
+    book: Mutex<Option<KrakenBook>>,
 }
 
 impl Default for Kraken {
     fn default() -> Self {
         Kraken {
-            book: RefCell::new(None),
+            book: Mutex::new(None),
         }
     }
 }
@@ -380,15 +386,15 @@ impl Kraken {
                 let book = KrakenBook::from_snapshot(data)?;
                 if compute_checksum(&book) != data.checksum {
                     tracing::warn!("kraken snapshot checksum mismatch, discarding");
-                    *self.book.borrow_mut() = None;
+                    *self.book.lock().expect("kraken book mutex poisoned") = None;
                     return None;
                 }
                 let model = book.to_model_book(parse_started_at);
-                *self.book.borrow_mut() = Some(book);
+                *self.book.lock().expect("kraken book mutex poisoned") = Some(book);
                 Some(model)
             }
             "update" => {
-                let mut guard = self.book.borrow_mut();
+                let mut guard = self.book.lock().expect("kraken book mutex poisoned");
                 let book = guard.as_mut()?;
                 book.apply_update(data)?;
                 if compute_checksum(book) != data.checksum {
@@ -614,7 +620,7 @@ mod tests {
     /// Corrupts one digit of the real snapshot's `checksum` field and
     /// confirms the mismatch path: `parse` returns `None` for the corrupted
     /// message, and a subsequent real `update` (which would otherwise
-    /// correctly apply if the `RefCell` still held a book) also returns
+    /// correctly apply if the `Mutex` still held a book) also returns
     /// `None` because the held state was cleared rather than left stale.
     #[test]
     fn a_corrupted_checksum_clears_the_held_book() {
