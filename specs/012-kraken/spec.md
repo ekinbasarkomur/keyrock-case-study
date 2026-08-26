@@ -2,7 +2,7 @@
 spec_name: "Kraken as a third venue — research spec, not for merging into main"
 spec_id: "012"
 spec_folder: "012-kraken"
-status: "draft"
+status: "approved"
 created_at: "2026-08-26"
 updated_at: "2026-08-26"
 created_by: "spec-synthesizer"
@@ -93,13 +93,14 @@ venue costs, not to have quietly paid it already.
 - Changing `proto/orderbook.proto` (the wire schema is fixed by the brief).
 - Changing `src/merge.rs` — see Invariants below; this holds regardless of
   which architecture option gets picked.
-- Building Kraken's CRC32 checksum verification, unless a later Open
-  Question resolves that it's worth it.
-- Adding a fourth venue, or generalizing pair-format conversion beyond what
-  Kraken specifically needs.
+- Adding a fourth venue.
 - Picking a fixed-point or `Decimal` representation for Kraken's
   price/qty — `Price`/`Amount` stay `f64` newtypes project-wide, per the
   already-settled step-1 decision; nothing here re-opens that.
+- Generalizing the pair-format converter (Open Question 3, resolved below)
+  beyond what a `"ethbtc"`-shaped token needs — no support for pairs with
+  ambiguous base/quote splits (e.g. 4-letter quote currencies) unless a
+  real need for one shows up.
 
 ## Current State
 
@@ -219,14 +220,71 @@ Verified by reading the source, not assumed:
   implementation, not be hand-built — this spec does not include fixture
   text because no capture has happened yet.
 
-### What's NOT settled — the central architectural fork
+### Decided — the three smaller Open Questions
 
-Kraken's book channel forces a choice `Exchange::parse`'s current shape
-doesn't accommodate: producing a correct `Book` on every `update` message
-requires access to the previously-accumulated book, not just the current
-message's text. Four real options, laid out neutrally:
+- **Symbol format: build a general converter**, not a hardcoded
+  `"ETH/BTC"`. Given `--pair`/`KEYROCK_PAIR`'s existing shape (a lowercase
+  concatenated token, e.g. `"ethbtc"`), and that Binance/Bitstamp both
+  already lowercase/reuse that same token directly with no base/quote
+  split needed, Kraken's converter needs a real rule for where the split
+  falls. The simplest general rule this project's existing pair set
+  supports: split on a known quote-currency suffix (`btc`, `usd`, `eur`,
+  etc., matching what Binance/Bitstamp already assume are the only quote
+  currencies this project's `--pair` ever names), uppercase both halves,
+  join with `/`. Implemented and tested in `kraken.rs`, not a shared
+  utility — nothing else needs it.
+- **CRC32 checksum verification: build it.** The first per-message
+  integrity check in this codebase. Computed per the algorithm in
+  `inputs/002-kraken-api-docs.md` (top 10 asks low→high, then top 10 bids
+  high→low, digit-strings with `.` and leading zeros stripped,
+  concatenated, CRC32'd) after every `Kraken::parse` call that produces a
+  book, compared against the message's own `checksum` field. On mismatch:
+  log a warning and — per Kraken's own documented remedy — clear the held
+  `RefCell` state so the *next* message is forced to wait for a fresh
+  `snapshot` rather than continuing to accumulate from a state already
+  known to have diverged. Does not unsubscribe/reconnect on its own; the
+  next `snapshot` arrives only via reconnect or an explicit
+  re-subscribe, so a checksum failure without a reconnect would otherwise
+  leave the venue silently producing no further books until one occurs —
+  worth confirming live during implementation, not asserted here.
+- **Client-side ping: build proactive handling.** `run_feed`'s read loop
+  tracks the time of the last message received on the Kraken connection;
+  if idle past a threshold comfortably under Kraken's documented 60s
+  (e.g. 30s, mirroring this project's existing "well under the real
+  limit" margins elsewhere, such as the staleness thresholds), send
+  `{"method":"ping"}`. Kraken-specific — Binance needs no client-initiated
+  ping (server-initiated, already auto-answered by `tokio-tungstenite`)
+  and Bitstamp documents no ping requirement at all, so this is not a
+  change to the shared `run_feed` behavior for every venue, only a
+  Kraken-triggered branch (exact mechanism — a per-venue opt-in on the
+  `Exchange` trait vs. Kraken-specific logic living inside option (a)'s
+  own connection handling — decided during implementation).
 
-**(a) Interior-mutable state inside `Kraken`'s own struct** — e.g.
+### Decided — the central architectural fork
+
+**Resolved: option (a), interior-mutable state inside `Kraken`'s own
+struct.** `pub struct Kraken { book: RefCell<Option<Book>> }`.
+`parse(&self, raw: &str) -> Option<Book>` keeps its exact current
+signature — zero change to the `Exchange` trait, `Binance`, `Bitstamp`, or
+`run_feed`. A `snapshot` message replaces the cell's contents wholesale; an
+`update` message mutates the held book (applying each changed level,
+removing any level whose `qty` is `0`) and returns a clone of the resulting
+full state. `RefCell`, not `Mutex` — nothing here is genuinely concurrent;
+one `&Kraken` is held for the duration of a single-threaded `run_once` call
+in `src/feed.rs`.
+
+Accepted, going in with eyes open, per the tradeoffs already laid out
+below: this makes `Kraken::parse` order-dependent in a way `Binance`'s and
+`Bitstamp`'s aren't — calling it twice with the same `update` message would
+silently double-apply that delta, and nothing in the trait signature
+signals this to a future reader. Worth a loud comment on the struct and the
+`impl Exchange for Kraken` block saying so explicitly, since the trait
+itself won't.
+
+The other three options, kept below for the record (not chosen, but the
+reasoning that ruled them out):
+
+**(a) — CHOSEN, see "Decided" above. Interior-mutable state inside `Kraken`'s own struct** — e.g.
 `pub struct Kraken { book: RefCell<Option<Book>> }` (or `Mutex`, though
 `RefCell` suffices since nothing here is genuinely concurrent — one
 `&Kraken` is held for the duration of a single-threaded `run_once` call).
@@ -374,22 +432,18 @@ already done:
   is a real regression risk to `main`-adjacent code even on a branch that
   won't merge, if the branch is later cherry-picked from.
 - **Kraken's ping requirement is a directional reversal from both existing
-  venues.** Binance's server pings the client (already auto-answered by
+  venues** — Binance's server pings the client (already auto-answered by
   `tokio-tungstenite`); Bitstamp documents no ping requirement at all;
-  Kraken expects *this project's client* to send a ping at least every 60s
-  if otherwise idle. `run_feed` has no proactive client-side ping machinery
-  today. In practice a subscribed `book` channel plus Kraken's automatic
-  ~1s heartbeat likely keeps traffic well under 60s, so this may never
-  trigger — but it's a real documented gap this project's loop doesn't
-  cover, worth flagging even if not built.
-- **The symbol-format mismatch is a scope tradeoff, not just a bug.**
-  Hardcoding `"ETH/BTC"` for Kraken's `subscribe_message` (ignoring the
-  general `--pair`/`KEYROCK_PAIR` config value Binance/Bitstamp both
-  respect) is cheap but silently breaks if someone later runs this with a
-  different pair; deriving `"ETH/BTC"` from an arbitrary lowercase
-  concatenated token like `"ethbtc"` requires knowing the base/quote
-  boundary, which the current config format doesn't carry. See Open
-  Questions.
+  Kraken expects *this project's client* to send one. Building this (see
+  "Decided" above) means `run_feed`'s read loop needs an idle-timer branch
+  that's Kraken-specific, not shared — a small but real change to a loop
+  that's otherwise identical for every venue today; keep the branch scoped
+  narrowly so Binance/Bitstamp's read path is unaffected.
+- **The symbol converter (see "Decided" above) is only as correct as its
+  quote-currency suffix list.** A pair whose quote currency isn't in the
+  hardcoded suffix set fails to convert — acceptable for this branch's
+  scope (this project's own default and test pairs), a real limitation if
+  this were ever generalized further.
 
 ## Testing Strategy
 
@@ -439,38 +493,36 @@ porting to `main`, that would be its own separate spec, not this one.
 
 ## Open Questions
 
-The human brief and the docs research both say plainly: these need real
-answers, not guessed defaults. Listed here for that purpose.
+Four of the original six were real choices and are now resolved — the
+human weighed the tradeoffs above and answered directly, not a default
+picked here. The remaining two aren't choices at all; they're facts that
+don't exist yet because nothing has been captured or measured. Both block
+implementation just as hard as an unresolved choice would.
 
-1. **Which of the four architecture options (a/b/c/d above) reconciles
-   Kraken's incremental-update model with the existing `Exchange` trait and
-   `run_feed<E>` loop?** This is the central decision this spec deliberately
-   does not make. Needs a human call weighing blast radius on the two
-   working venues against how much this research branch is meant to prove.
-2. **Price/qty representation: bare JSON floats or decimal strings?**
+### Resolved
+
+1. **Architecture: option (a), interior-mutable state inside `Kraken`'s own
+   struct.** See "Decided — the central architectural fork" above.
+2. **Symbol format: build a general converter**, not a hardcoded
+   `"ETH/BTC"`. See "Decided — the three smaller Open Questions" above.
+3. **CRC32 checksum: build it.** See "Decided — the three smaller Open
+   Questions" above.
+4. **Client-side ping: build proactive handling.** See "Decided — the
+   three smaller Open Questions" above.
+
+### Still open — need a real capture/measurement, not a decision
+
+5. **Price/qty representation: bare JSON floats or decimal strings?**
    Kraken's own docs disagree with themselves (the `book` channel reference
    types them as `float` with numeric examples; the checksum guide shows
    string examples and explicitly recommends a decimal/string decoder).
-   Not resolvable from docs alone — needs a real captured message before
-   `kraken.rs`'s struct shape (`Vec<[&str; 2]>` vs. `Vec<Level<'a>>` with
-   typed fields) can be decided.
-3. **Symbol format: hardcode `"ETH/BTC"` for now, or build a general
-   lowercase-concatenated-to-slash-separated-uppercase converter?** The
-   project's `--pair`/`KEYROCK_PAIR` config is a single token like
-   `"ethbtc"`; Kraken wants `["ETH/BTC"]`. Hardcoding is cheap but only
-   correct for the one pair this project defaults to; a general converter
-   needs to know the base/quote boundary, which the current format doesn't
-   encode.
-4. **Is Kraken's optional CRC32 checksum verification worth building?**
-   It's the first per-message integrity check this codebase would have if
-   built — genuinely optional per Kraken's own docs, with one documented
-   concrete use (unsubscribe/re-subscribe to force a fresh snapshot on
-   mismatch) if it is built. Not assumed either way.
-5. **What is Kraken's actual staleness threshold?** Must be measured live
+   Not resolvable from docs alone, and not something a human can just pick
+   — `kraken.rs`'s struct shape (`Vec<[&str; 2]>` vs. `Vec<Level<'a>>` with
+   typed `f64` fields) has to match what Kraken's server actually sends.
+   Resolved by capturing a real message during implementation, the same
+   way `bitstamp.rs`'s fixture was captured before it was written.
+6. **What is Kraken's actual staleness threshold?** Must be measured live
    against a real connection, the same discipline used for Bitstamp's 8s
-   figure — no number is proposed here since none has been measured yet.
-6. **Does Kraken's client-side ping requirement (send at least every 60s if
-   otherwise idle) need active handling in `run_feed`, or is the automatic
-   ~1s heartbeat plus live book-channel traffic enough to make it
-   practically unreachable?** Flagged as a real documented gap; not
-   resolved by inspection.
+   figure (`specs/006-bitstamp/`) — no number is proposed here since none
+   has been measured yet. This is a plan/tasks-phase or early-implementation
+   step, not something to guess into the spec now.
