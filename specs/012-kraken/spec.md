@@ -532,10 +532,16 @@ implementation just as hard as an unresolved choice would.
    snapshot, and `heartbeat` is exactly `{"channel":"heartbeat"}` with no
    other fields — all matching the docs research, no surprises there.
 
-### Still open — need a real capture/measurement, not a decision
+### Resolved by live measurement (2026-08-26)
 
-6. **What is Kraken's actual staleness threshold?** Must be measured live
-   against a real connection, the same discipline used for Bitstamp's 8s
-   figure (`specs/006-bitstamp/`) — no number is proposed here since none
-   has been measured yet. This is a plan/tasks-phase or early-implementation
-   step, not something to guess into the spec now.
+6. **Staleness threshold: 12s.** Held a live `wss://ws.kraken.com/v2` `book`
+   connection open for 300.6s (ETH/BTC, via this project's proxy), counting
+   gaps between real `book`-channel messages only (`snapshot`/`update` —
+   `heartbeat`/`status` don't carry book state and were excluded from the
+   gap measurement, the same reasoning `009-resilience` used for Bitstamp).
+   16,444 book messages in the window (~54.7/s — a much higher natural
+   cadence than Bitstamp's ~2.5/s, since Kraken's incremental model means
+   even a single-level change is its own message), max observed gap
+   2.914s, median 0.000s (updates arrive in bursts), mean 0.018s. Threshold
+   set at ~4x the observed max, rounded up — same rule Bitstamp's 8s figure
+   used (1.795s max → 8s) — giving `2.914 * 4 ≈ 11.66` → **12s**.
