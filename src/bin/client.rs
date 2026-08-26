@@ -275,8 +275,8 @@ fn render(
             &mut out,
             &format!(
                 "{} {}",
-                level_cell(bid, colour, "32", BAR_BG_BID, max_amount),
-                level_cell(ask, colour, "31", BAR_BG_ASK, max_amount)
+                level_cell(bid, colour, "32", BAR_BG_BID, max_amount, FillFrom::Right),
+                level_cell(ask, colour, "31", BAR_BG_ASK, max_amount, FillFrom::Left)
             ),
         );
     }
@@ -345,6 +345,17 @@ const CELL_FG_SPLIT: usize = 26;
 const BAR_BG_BID: &str = "48;5;22";
 const BAR_BG_ASK: &str = "48;5;52";
 
+/// Which edge of the cell a depth bar grows from. Bids sit in the left
+/// column and asks in the right, so filling bids from the right and asks
+/// from the left makes both bars grow toward the shared border between the
+/// two columns — the spread — instead of both growing left-to-right
+/// regardless of side.
+#[derive(Clone, Copy)]
+enum FillFrom {
+    Left,
+    Right,
+}
+
 /// One bid or ask cell: price, amount, venue label, with a depth bar shaded
 /// into the row's background — proportional to `level`'s amount against
 /// `max_amount` (the largest amount across *both* sides currently
@@ -358,6 +369,7 @@ fn level_cell(
     price_fg: &str,
     bar_bg: &str,
     max_amount: f64,
+    fill_from: FillFrom,
 ) -> String {
     let Some(l) = level else {
         return " ".repeat(CELL_WIDTH);
@@ -374,21 +386,36 @@ fn level_cell(
     } else {
         0
     };
-    shade_cell(&plain, price_fg, bar_bg, fill_len)
+    shade_cell(&plain, price_fg, bar_bg, fill_len, fill_from)
 }
 
 /// Wraps `plain` (exactly `CELL_WIDTH` visible chars) in ANSI codes, run by
 /// run, combining two independent boundaries: `CELL_FG_SPLIT` (foreground
 /// colour changes from `price_fg` to dim) and `fill_len` (background turns
-/// from `bar_bg` to the terminal default). Each run re-states both its
-/// foreground and background explicitly — SGR state otherwise persists
-/// across writes, so leaving either unstated at a run boundary would bleed
-/// the previous run's colour into the next one.
-fn shade_cell(plain: &str, price_fg: &str, bar_bg: &str, fill_len: usize) -> String {
+/// from `bar_bg` to the terminal default, on the edge `fill_from` picks).
+/// Each run re-states both its foreground and background explicitly — SGR
+/// state otherwise persists across writes, so leaving either unstated at a
+/// run boundary would bleed the previous run's colour into the next one.
+fn shade_cell(
+    plain: &str,
+    price_fg: &str,
+    bar_bg: &str,
+    fill_len: usize,
+    fill_from: FillFrom,
+) -> String {
+    let fill_len = fill_len.min(CELL_WIDTH);
+    // `Left` shades [0, fill_len); `Right` shades [CELL_WIDTH - fill_len,
+    // CELL_WIDTH) — the same length, anchored to the opposite edge.
+    let (bar_start, bar_end) = match fill_from {
+        FillFrom::Left => (0, fill_len),
+        FillFrom::Right => (CELL_WIDTH - fill_len, CELL_WIDTH),
+    };
+
     let mut boundaries = [
         0,
         CELL_FG_SPLIT.min(CELL_WIDTH),
-        fill_len.min(CELL_WIDTH),
+        bar_start,
+        bar_end,
         CELL_WIDTH,
     ];
     boundaries.sort_unstable();
@@ -401,7 +428,11 @@ fn shade_cell(plain: &str, price_fg: &str, bar_bg: &str, fill_len: usize) -> Str
             continue;
         }
         let fg = if start < CELL_FG_SPLIT { price_fg } else { "2" };
-        let bg = if start < fill_len { bar_bg } else { "49" };
+        let bg = if start >= bar_start && start < bar_end {
+            bar_bg
+        } else {
+            "49"
+        };
         out.push_str(&format!("\x1b[{fg};{bg}m"));
         out.extend(&chars[start..end]);
     }
