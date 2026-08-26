@@ -39,6 +39,8 @@ fn book_with_offset(price_offset: f64) -> Book {
         bids,
         asks,
         last_update_id: 1,
+        parse_started_at: std::time::Instant::now(),
+        parsed_at: std::time::Instant::now(),
     }
 }
 

@@ -10,6 +10,7 @@
 
 use std::cmp::Ordering;
 use std::fmt;
+use std::time::Instant;
 
 /// A price, parsed directly from the exchange's decimal string.
 ///
@@ -110,6 +111,13 @@ pub struct Book {
     pub bids: Vec<(Price, Amount)>,
     pub asks: Vec<(Price, Amount)>,
     pub last_update_id: u64,
+    /// When this book's parse began, stamped as the first statement in the
+    /// owning `Exchange::parse` — before `serde_json::from_str` runs. Feeds
+    /// `src/aggregator.rs`'s parse-span histogram (see `specs/011-measurement`).
+    pub parse_started_at: Instant,
+    /// When this book's parse succeeded, stamped immediately before the
+    /// `Some(Book { .. })` return — never set on an early `None` return.
+    pub parsed_at: Instant,
 }
 
 #[cfg(test)]

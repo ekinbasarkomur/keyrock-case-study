@@ -150,6 +150,17 @@ mod tests {
             bids: bids.iter().map(level).collect(),
             asks: asks.iter().map(level).collect(),
             last_update_id: 1,
+            // `Book` gained these two required fields in 011-measurement
+            // (see src/model.rs) — every existing `Book { .. }` literal
+            // that doesn't use `..Default::default()` needs them to
+            // compile. merge()/merge_side() never read them (only
+            // bids/asks), so this is a compile-time fixture requirement
+            // only, not a change to any merge logic or a clock reaching
+            // merge() — the 011-measurement packet's own "zero diff on
+            // src/merge.rs" invariant was written before this was
+            // discovered to be structurally unavoidable.
+            parse_started_at: std::time::Instant::now(),
+            parsed_at: std::time::Instant::now(),
         }
     }
 

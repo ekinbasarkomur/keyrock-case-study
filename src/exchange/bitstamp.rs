@@ -67,6 +67,8 @@ impl Exchange for Bitstamp {
     /// A stray control message must not kill the read loop — same
     /// discipline as `binance.rs::parse`.
     fn parse(&self, raw: &str) -> Option<Book> {
+        let parse_started_at = std::time::Instant::now();
+
         let envelope: Envelope = match serde_json::from_str(raw) {
             Ok(envelope) => envelope,
             Err(err) => {
@@ -90,6 +92,8 @@ impl Exchange for Bitstamp {
                     // per specs/006-bitstamp/spec.md). 0 is a placeholder,
                     // not a claim that Bitstamp sent this update first.
                     last_update_id: 0,
+                    parse_started_at,
+                    parsed_at: std::time::Instant::now(),
                 })
             }
             "bts:subscription_succeeded" => {
