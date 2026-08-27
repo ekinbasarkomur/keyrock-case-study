@@ -33,7 +33,7 @@ const ROWS: usize = 10;
 /// hardcoded into the header string — so step 7 can attach per-venue status
 /// (see spec.md's "design for step 7") by extending what `render` does with
 /// this list, not by restructuring its signature.
-const VENUES: [Venue; 2] = [Venue::Binance, Venue::Bitstamp];
+const VENUES: [Venue; 3] = [Venue::Binance, Venue::Bitstamp, Venue::Kraken];
 
 #[derive(Parser)]
 #[command(name = "client", version, about = "keyrock-case-study demo client")]
