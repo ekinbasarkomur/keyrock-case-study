@@ -35,7 +35,11 @@ rand = "0.10.2"
 # until step 4 because Binance accepts TLS1.3.
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+# `raw_value` added in 012-kraken (research branch): Kraken's checksum
+# algorithm operates on the exact wire-text digit string of each
+# price/qty, not a reformatted `f64` — `serde_json::value::RawValue`
+# captures that source text directly. See src/exchange/kraken.rs.
+serde_json = { version = "1.0.151", features = ["raw_value"] }
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-stream = { version = "0.1.19", features = ["sync", "net"] }
@@ -50,6 +54,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # histograms), not just a bench — dev-dependencies aren't reachable from the
 # shipped binary.
 hdrhistogram = "7.6.0"
+crc32fast = "1.5.1"
 
 [build-dependencies]
 tonic-prost-build = "0.14.6"

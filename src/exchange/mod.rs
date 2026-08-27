@@ -10,17 +10,25 @@ use crate::model::Book;
 
 pub mod binance;
 pub mod bitstamp;
+// Research-only (branch 012-kraken, not merged into main) — see
+// specs/012-kraken/spec.md. Kept behind the same Exchange trait as every
+// other venue; see kraken.rs's own module doc for why its parse() looks
+// structurally different (interior-mutable accumulation, not a pure
+// function of one message).
+pub mod kraken;
 
 /// Which venue a `Book` (or a published `Level`) came from. An enum, not a
 /// string, so adding another venue makes every place that needs updating
 /// fail to compile instead of silently doing nothing. `Binance` must stay
 /// the first variant — `BTreeMap<Venue, _>` iteration order (and this
 /// step's "first entry wins" `summarise` selection) depends on declaration
-/// order, not insertion order.
+/// order, not insertion order. `Kraken` is appended last, not inserted, for
+/// the same reason — it preserves Binance/Bitstamp's existing ordering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Venue {
     Binance,
     Bitstamp,
+    Kraken,
 }
 
 impl fmt::Display for Venue {
@@ -28,6 +36,7 @@ impl fmt::Display for Venue {
         match self {
             Venue::Binance => write!(f, "binance"),
             Venue::Bitstamp => write!(f, "bitstamp"),
+            Venue::Kraken => write!(f, "kraken"),
         }
     }
 }
@@ -52,6 +61,10 @@ impl Venue {
             // Binance's refill rate and the same small capacity — stated
             // here plainly rather than presented as fact.
             Venue::Bitstamp => (5.0, 0.5),
+            // No documented Kraken public-WebSocket connection-rate limit
+            // was found (see specs/012-kraken/spec.md's docs research) —
+            // same "stated guess, not fact" treatment as Bitstamp's entry.
+            Venue::Kraken => (5.0, 0.5),
         }
     }
 
@@ -79,6 +92,13 @@ impl Venue {
             // produce a longer natural gap than this window happened to
             // catch. See README for the full measurement.
             Venue::Bitstamp => Duration::from_secs(8),
+            // Measured live, 2026-08-26, ETH/BTC, 300.6s: 16,444 book-channel
+            // messages (snapshot+update only — heartbeat/status don't carry
+            // book state and were excluded), max observed gap 2.914s, median
+            // 0.000s (updates arrive in bursts). Threshold set to ~4x the
+            // observed max, same rule Bitstamp's figure used:
+            // 2.914 * 4 ≈ 11.66 → 12s. See specs/012-kraken/spec.md.
+            Venue::Kraken => Duration::from_secs(12),
         }
     }
 }
@@ -123,6 +143,14 @@ mod tests {
             Venue::Binance.staleness_threshold(),
             Venue::Bitstamp.staleness_threshold()
         );
+        assert_ne!(
+            Venue::Bitstamp.staleness_threshold(),
+            Venue::Kraken.staleness_threshold()
+        );
+        assert_ne!(
+            Venue::Binance.staleness_threshold(),
+            Venue::Kraken.staleness_threshold()
+        );
     }
 
     /// Bug this catches: `Venue`'s `Display` string ends up verbatim in the
@@ -134,5 +162,6 @@ mod tests {
     fn venue_display_matches_the_wire_contracts_lowercase_strings() {
         assert_eq!(Venue::Binance.to_string(), "binance");
         assert_eq!(Venue::Bitstamp.to_string(), "bitstamp");
+        assert_eq!(Venue::Kraken.to_string(), "kraken");
     }
 }

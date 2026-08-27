@@ -4,6 +4,11 @@
 //! worth testing belongs in the library crate (`src/lib.rs`), which the
 //! integration tests in `tests/` can actually reach.
 //!
+//! Research-only (branch `012-kraken`, not merged into `main`): a third feed
+//! task (`feed::run_feed::<Kraken>`) is spawned below, alongside the
+//! Binance/Bitstamp pair the rest of this comment describes — see
+//! `specs/012-kraken/spec.md`.
+//!
 //! Four tasks run concurrently from here: the Binance and Bitstamp feeds
 //! (`feed::run_feed::<Binance>` and `feed::run_feed::<Bitstamp>` — the
 //! generic driver loop shared by every `Exchange` implementation lives in
@@ -24,6 +29,9 @@ use clap::Parser;
 use keyrock_case_study::exchange::Venue;
 use keyrock_case_study::exchange::binance::Binance;
 use keyrock_case_study::exchange::bitstamp::Bitstamp;
+// Research-only (012-kraken, not merged into main) — see
+// specs/012-kraken/spec.md.
+use keyrock_case_study::exchange::kraken::Kraken;
 use keyrock_case_study::model::Book;
 use keyrock_case_study::{aggregator, feed, server};
 use keyrock_case_study::{config::Config, telemetry};
@@ -104,7 +112,8 @@ async fn main() -> Result<()> {
 
     let pair = config.pair.clone();
     let binance_tx = feed_tx.clone();
-    let bitstamp_tx = feed_tx;
+    let bitstamp_tx = feed_tx.clone();
+    let kraken_tx = feed_tx;
 
     // Every task is wrapped in an async block that tags its outcome with a
     // `Component` before handing it to the `JoinSet` — a `JoinSet` (unlike
@@ -112,14 +121,22 @@ async fn main() -> Result<()> {
     // so the identity has to travel inside the result itself.
     let mut tasks: JoinSet<TaskResult> = JoinSet::new();
     let binance_pair = pair.clone();
+    let bitstamp_pair = pair.clone();
     let aggregator_pair = pair.clone();
     tasks.spawn(async move {
         let res = feed::run_feed(Binance, binance_pair, binance_tx).await;
         (Component::Feed(Venue::Binance), res)
     });
     tasks.spawn(async move {
-        let res = feed::run_feed(Bitstamp, pair, bitstamp_tx).await;
+        let res = feed::run_feed(Bitstamp, bitstamp_pair, bitstamp_tx).await;
         (Component::Feed(Venue::Bitstamp), res)
+    });
+    // Research-only (012-kraken, not merged into main) — see
+    // specs/012-kraken/spec.md. Structurally identical to the two spawns
+    // above; `feed::run_feed<E>` never branches on which venue it's driving.
+    tasks.spawn(async move {
+        let res = feed::run_feed(Kraken::new(), pair, kraken_tx).await;
+        (Component::Feed(Venue::Kraken), res)
     });
     tasks.spawn(async move {
         aggregator::run(feed_rx, tx, aggregator_pair).await;
