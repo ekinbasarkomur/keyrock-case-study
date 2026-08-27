@@ -151,11 +151,12 @@ against the original wire digits, not a round-tripped float).
 
 Every number below is from a real run, not a synthetic benchmark.
 `src/aggregator.rs` times each book with `hdrhistogram` and logs
-p50/p99/p99.9 every 30s. **Known gap, not yet fixed**: the histogram is
-never reset, so every logged percentile is cumulative since process start,
-not a recent window — one bad tick an hour into a run still dominates
-p999 a day later. A rolling-window fix is planned; until it lands, read
-p999 especially as "worst moment ever," not "worst moment recently."
+p50/p99/p99.9 every 30s. Each histogram resets right after it's read, so
+every log line describes the last ~30s, not the process's whole lifetime —
+a bad tick shows up in one report and is gone from the next, not
+permanently stuck in p999. The tradeoff is the flip side of that: a true
+once-ever worst case is only visible in the single window it happened in,
+never again — this trades "worst ever" for "worst recently" on purpose.
 
 **Prediction, written down before any code:** p50 5-25µs, parse the biggest
 cost.

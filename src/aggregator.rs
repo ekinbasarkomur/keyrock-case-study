@@ -62,17 +62,22 @@ struct VenueState {
 struct Aggregator {
     venues: BTreeMap<Venue, VenueState>,
     /// `book.parsed_at - book.parse_started_at`, recorded for every received
-    /// book regardless of whether it's ultimately published.
+    /// book regardless of whether it's ultimately published. **Windowed, not
+    /// lifetime**: `log_report` resets this after every read, so at any
+    /// moment it holds only samples from the current, still-in-progress
+    /// `REPORT_INTERVAL` window (see 013-rolling-histogram).
     parse_histogram: Histogram<u64>,
     /// `published_at - book.parsed_at` — includes queueing behind other
     /// `mpsc` messages and the `fresh_venues` staleness filter, not just
     /// `merge()`'s own comparisons (see spec.md Piece 1). Recorded only when
-    /// a book actually reaches a `tx.send`.
+    /// a book actually reaches a `tx.send`. **Windowed, not lifetime** — see
+    /// `parse_histogram`'s doc comment.
     merge_publish_histogram: Histogram<u64>,
     /// `published_at - book.parse_started_at`, a fresh `Instant::now()` call
     /// distinct from the one behind `merge_publish_histogram` — percentiles
     /// aren't additive, so this is a real third measurement, not derived by
-    /// summing the other two.
+    /// summing the other two. **Windowed, not lifetime** — see
+    /// `parse_histogram`'s doc comment.
     total_histogram: Histogram<u64>,
     /// How many merges actually reached a `tx.send` (i.e. produced a
     /// `Summary` that differed from the last published one).
@@ -163,7 +168,7 @@ pub async fn run(
                 }
             }
             _ = report_tick.tick() => {
-                log_report(&aggregator, update_count_at_last_report, REPORT_INTERVAL);
+                log_report(&mut aggregator, update_count_at_last_report, REPORT_INTERVAL);
                 update_count_at_last_report = aggregator.update_count;
             }
         }
@@ -276,7 +281,20 @@ fn record_duration(histogram: &mut Histogram<u64>, duration: Duration, label: &s
 /// sustained published-update rate over the last `window`, and the running
 /// duplicate percentage (guarded against a zero total-merge count, which
 /// would otherwise divide by zero and log `NaN`).
-fn log_report(aggregator: &Aggregator, update_count_at_last_report: u64, window: Duration) {
+///
+/// **The three histograms are reset immediately after being read here**, so
+/// each report describes only the samples recorded since the *previous*
+/// report — a rolling ~`REPORT_INTERVAL` window, not the process's entire
+/// lifetime. Without this, one bad tick early in a long-running process
+/// would dominate p999 in every report for the rest of that process's life,
+/// which is exactly what a periodic "how are things going right now" line
+/// must not do. The reset happens last, after every value in this function
+/// has already been read — resetting first would report an empty/degenerate
+/// window instead of the one that just elapsed. `duplicate_pct` stays
+/// cumulative on purpose (`update_count`/`duplicate_count` are running
+/// totals used elsewhere, not report-local); only the latency histograms
+/// are windowed.
+fn log_report(aggregator: &mut Aggregator, update_count_at_last_report: u64, window: Duration) {
     let updates_this_window = aggregator.update_count - update_count_at_last_report;
     let update_rate_per_sec = updates_this_window as f64 / window.as_secs_f64();
     // `update_count + duplicate_count` is the true total merge count — a
@@ -305,6 +323,10 @@ fn log_report(aggregator: &Aggregator, update_count_at_last_report: u64, window:
         duplicate_pct,
         "latency/throughput report"
     );
+
+    aggregator.total_histogram.reset();
+    aggregator.parse_histogram.reset();
+    aggregator.merge_publish_histogram.reset();
 }
 
 /// The pure decision behind piece 6: has the grace period elapsed with no
@@ -532,6 +554,58 @@ mod tests {
         assert!(
             rx.borrow().is_some(),
             "a Summary was actually published down the watch channel, not just counted"
+        );
+    }
+
+    /// The bug this packet fixes (013-rolling-histogram): before this, the
+    /// three histograms were never reset, so a `log_report` call read
+    /// percentiles over the process's entire lifetime rather than the
+    /// window since the previous report. Records one sample, calls
+    /// `log_report` (which must reset afterward), records a second, larger
+    /// sample, and asserts the histogram now holds exactly that one new
+    /// sample — not two, and not still dominated by the first.
+    #[test]
+    fn a_histogram_reset_after_report_excludes_prior_samples() {
+        let (tx, _rx) = watch::channel::<Option<Arc<Summary>>>(None);
+        let mut aggregator = Aggregator::new();
+
+        let now = Instant::now();
+        let first_book = Book {
+            parse_started_at: now - Duration::from_micros(37),
+            parsed_at: now,
+            ..empty_book()
+        };
+        record_and_publish(&mut aggregator, Venue::Binance, first_book, &tx, now);
+        assert_eq!(aggregator.parse_histogram.len(), 1);
+
+        log_report(&mut aggregator, 0, REPORT_INTERVAL);
+        assert_eq!(
+            aggregator.parse_histogram.len(),
+            0,
+            "log_report must reset the histogram after reading it"
+        );
+
+        // A second, later book — a much larger parse span, so if the first
+        // sample were still present the reported percentiles would blend
+        // the two rather than reflecting only this one.
+        let now2 = now + Duration::from_secs(1);
+        let second_book = Book {
+            parse_started_at: now2 - Duration::from_millis(5),
+            parsed_at: now2,
+            ..empty_book()
+        };
+        record_and_publish(&mut aggregator, Venue::Binance, second_book, &tx, now2);
+
+        assert_eq!(
+            aggregator.parse_histogram.len(),
+            1,
+            "only the second sample should be present after the reset"
+        );
+        let p50_us = aggregator.parse_histogram.value_at_quantile(0.50) as f64 / 1_000.0;
+        assert!(
+            p50_us > 4_000.0,
+            "reported p50 ({p50_us}us) should reflect the ~5ms second sample, \
+             not a blend with the ~37us first one that was already reported and reset"
         );
     }
 
