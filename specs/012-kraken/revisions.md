@@ -104,3 +104,21 @@ what merges. What *does* follow from this reversal: `main`'s README and
 any place describing this project as a two-venue system need updating to
 reflect three (Binance, Bitstamp, Kraken) — tracked as a follow-up commit
 on `main`, not folded into this packet's own history.
+
+## 4. `src/bin/client.rs` didn't show Kraken — found after merge, fixed on `main`
+
+**Gap**: `client.rs`'s `VENUES` constant, used for the terminal header's
+per-venue `●`/`○ stale` status row, was `[Venue::Binance, Venue::Bitstamp]`
+— never touched by this packet, since `src/bin/client.rs` was outside
+012-kraken's declared scope (only `src/exchange/mod.rs`, `src/exchange/
+kraken.rs`, `src/feed.rs`, `src/main.rs` were in scope — see spec.md's
+`related_paths`). Consequence: the book rows (bids/asks) already showed
+`kraken`-labelled levels correctly, since those render straight from the
+`Summary` with no venue filtering — but the header's live/stale indicator
+line never grew a third entry for Kraken.
+
+**Fix**: `VENUES` becomes `[Venue::Binance, Venue::Bitstamp, Venue::Kraken]`
+(`[Venue; 3]`), applied directly on `main` after this packet's merge (see
+revision 3 — this branch's own history is closed, so the fix isn't folded
+into a 012-kraken commit). One line; `VenueTracker`/`render` already take
+the venue list as a parameter and don't hardcode a count.
