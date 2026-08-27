@@ -89,3 +89,18 @@ not simulated.
 
 This branch is research-only. `main`'s two-venue system is unaffected by
 any of the above.
+
+## 3. Decision reversed: this branch merges into `main` after all
+
+Every prior spec.md/plan.md/tasks.md/commit-message in this packet states
+"research-only, will not merge into `main`." That framing held through
+implementation and Phase 6 live verification. After reviewing the
+finished, live-verified work, the user decided to merge it — Kraken
+becomes a real third venue on `main`, not a research artifact.
+
+Nothing about the implementation itself changed as a result of this
+decision — the code, tests, and live-verified behavior above are exactly
+what merges. What *does* follow from this reversal: `main`'s README and
+any place describing this project as a two-venue system need updating to
+reflect three (Binance, Bitstamp, Kraken) — tracked as a follow-up commit
+on `main`, not folded into this packet's own history.
