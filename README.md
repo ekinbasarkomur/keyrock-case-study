@@ -1,16 +1,18 @@
 # keyrock-case-study
 
 A take-home case study for a Rust engineer role at Keyrock. It connects to
-Binance and Bitstamp order-book feeds, merges them into one book, and
-streams the spread plus the top 10 bids/asks over gRPC
+Binance, Bitstamp, and Kraken order-book feeds, merges them into one book,
+and streams the spread plus the top 10 bids/asks over gRPC
 (`proto/orderbook.proto`).
 
-Steps 0-9 of 11 are done. Both feeds carry real market data. One aggregator
-task merges them and publishes on a `watch` channel; the gRPC server
-streams that to clients on every change. A feed reconnects on its own. A
-stale venue drops out of the merge. A pair that never produces data exits
-after 60s. A terminal client shows the live book. Real latency and
-throughput numbers are in [Measurement](#measurement).
+Steps 0-9 of 11 are done. All three feeds carry real market data. One
+aggregator task merges them and publishes on a `watch` channel; the gRPC
+server streams that to clients on every change. A feed reconnects on its
+own. A stale venue drops out of the merge. A pair that never produces data
+exits after 60s. A terminal client shows the live book. Real latency and
+throughput numbers are in [Measurement](#measurement). Kraken was added
+after the brief's two required venues, as a check on how cheap a third
+venue really is — see [Kraken](#kraken) for what that cost.
 
 ## Build order
 
@@ -47,8 +49,8 @@ cargo run --bin keyrock-case-study -- --pair btcusd --port 12345
 Three binaries now, so `--bin` picks one: the server, `client`, and
 `loadtest` (see [Measurement](#measurement)).
 
-Four tasks run together: both feeds, the aggregator, the gRPC server. A
-feed dying reconnects on its own; the aggregator or server dying ends the
+Five tasks run together: all three feeds, the aggregator, the gRPC server.
+A feed dying reconnects on its own; the aggregator or server dying ends the
 process. Logs go to stderr, stdout stays empty.
 
 ## gRPC server
@@ -62,7 +64,7 @@ grpcurl -plaintext localhost:50051 list
 grpcurl -plaintext -max-time 3 localhost:50051 orderbook.OrderbookAggregator/BookSummary
 ```
 
-The output is a real merged book — both venues, sorted by price.
+The output is a real merged book — all three venues, sorted by price.
 
 ## Client
 
@@ -93,8 +95,8 @@ on connect alone would let a connect-then-drop loop settle into one attempt
 a second, forever.
 
 A token bucket caps attempts per venue on top of backoff. Binance: 5
-capacity, 1/s refill, from its documented limit. Bitstamp publishes no
-limit; 5 capacity, 0.5/s is a guess, not a fact.
+capacity, 1/s refill, from its documented limit. Bitstamp and Kraken
+publish no limit; 5 capacity, 0.5/s is a guess, not a fact, for both.
 
 ## Staleness
 
@@ -102,18 +104,58 @@ A venue mid-reconnect still has an old book sitting in the aggregator.
 Publishing it as current would be wrong. Before every merge, any venue past
 its threshold is dropped. Binance: 1.5s — it pushes a snapshot every 100ms,
 so silence means dead. Bitstamp: 8s, measured live (max gap seen: 1.8s over
-~5 minutes) — it only publishes on change, so it needs more slack. If every
-venue is stale, nothing publishes.
+~5 minutes). Kraken: 12s, measured live the same way (max gap seen: 2.9s
+over 300s, 16,444 book messages) — like Bitstamp, it only publishes on
+change, so it needs more slack. If every venue is stale, nothing publishes.
 
 Grace period: Bitstamp accepts any pair name, so a typo silently produces
 two feeds that connect and never publish. If no venue has produced data
 after 60s, the process exits and names the pair.
 
+## Kraken
+
+Added after the brief's two required venues, to find out what a third one
+actually costs given the architecture was supposedly built for it. Two of
+`src/exchange/mod.rs`, `src/feed.rs`, `src/main.rs` picked up small,
+mechanical additions (a `Venue::Kraken` arm, a scoped ping branch, a third
+spawn); `src/exchange/kraken.rs` did not turn out to be mechanical.
+
+**Kraken's book channel isn't self-contained per message, unlike
+Binance/Bitstamp's.** It sends one full snapshot on subscribe, then only
+the changed levels after that (`qty: 0` means remove). Binance's
+`depth20@100ms` and this project's chosen Bitstamp channel both resend the
+full top-N every message, which is why `Exchange::parse(&self, ...)` could
+stay a pure function of one message. Kraken can't work that way — producing
+a real book means holding the last one and patching it. `Kraken` carries
+that state in a `std::sync::Mutex<Option<Book>>` (`RefCell` was tried
+first and compiled and passed its own tests in isolation, but failed a
+real crate-wide build: `RefCell` is `!Sync`, and `tokio::spawn` needs the
+holding future to be `Send` — a gap an isolated module test can't see).
+Nothing about this is actually concurrent — one connection owns the
+`Mutex` at a time — it exists only to satisfy that bound.
+
+The consequence worth naming: `Kraken::parse` is order-dependent.
+Binance/Bitstamp's `parse` is safe to call twice with the same input;
+Kraken's silently double-applies a delta if it's ever fed the same update
+twice. Documented loudly on the type, not left implicit.
+
+Two more things it needed that the other two didn't: a symbol converter
+(Kraken wants `"ETH/BTC"`, this project's `--pair` is `"ethbtc"`), and a
+CRC32 checksum — Kraken sends one with every message; verified here,
+confirmed bit-exact against a real captured snapshot before trusting it,
+because getting it wrong is easy (reformatting a parsed `f64` back to text
+drops trailing zeros and silently breaks it — the checksum has to run
+against the original wire digits, not a round-tripped float).
+
 ## Measurement
 
-Every number below is from a real run against Binance and Bitstamp, not a
-synthetic benchmark. `src/aggregator.rs` times each book with
-`hdrhistogram` and logs p50/p99/p99.9 every 30s.
+Every number below is from a real run, not a synthetic benchmark.
+`src/aggregator.rs` times each book with `hdrhistogram` and logs
+p50/p99/p99.9 every 30s. **Known gap, not yet fixed**: the histogram is
+never reset, so every logged percentile is cumulative since process start,
+not a recent window — one bad tick an hour into a run still dominates
+p999 a day later. A rolling-window fix is planned; until it lands, read
+p999 especially as "worst moment ever," not "worst moment recently."
 
 **Prediction, written down before any code:** p50 5-25µs, parse the biggest
 cost.
@@ -150,11 +192,18 @@ the way: connecting all clients at once reset most of them, while CPU sat
 idle — a connection burst, not a load problem. Spacing the connects out by
 5ms each fixed it; the table above is from the fixed version.
 
-**24-hour run: started 2026-08-25T22:58:10Z, commit `02754a4`.** Binance
-closes every connection at 24h, so this is the only real test of the
-reconnection path against what it was built for. **Pending** — reconnect
-counts, latency drift, peak memory, and the full-run duplicate rate land
-here once it finishes.
+**24-hour run: started 2026-08-26T13:09:46Z, commit `02754a4`, ran 32+
+hours.** Zero reconnects, zero errors — but that also means **Binance's
+documented 24h forced close never actually triggered in this run**; that
+specific claim stays unconfirmed here, not verified, and isn't restated as
+fact elsewhere in this README. p50 drifted from ~60µs to ~94µs over the
+run — real, not noise, cause not diagnosed (could be the accumulating
+histogram above, could be a genuine change in book activity). Duplicate
+rate drifted from ~15% to ~33% over the same window, likely market
+activity rather than anything in the code. This run is being superseded by
+a fresh one once the histogram windowing gap above is fixed, so these
+numbers won't be updated further — they're reported as what was actually
+observed, not smoothed into "stable" because that's what was expected.
 
 ## Design decisions
 
@@ -167,7 +216,9 @@ here once it finishes.
   decimals (`specs/002-binance-feed/revisions.md`).
 - **One `Exchange` trait, kept synchronous.** `async fn` in a trait can't
   be used behind `dyn Trait` anyway, and every call site is a concrete
-  type.
+  type. Kraken's `parse` needs interior-mutable state (see
+  [Kraken](#kraken)) — the trait signature itself didn't change to
+  accommodate that, only Kraken's own implementation did.
 - **Tie-break: same price, bigger amount wins, both sides.** A full tie
   (same price and amount) goes to whichever venue was declared first
   (Binance).
@@ -191,7 +242,8 @@ here once it finishes.
 │   ├── exchange/
 │   │   ├── mod.rs          Exchange trait, Venue
 │   │   ├── binance.rs      Binance impl
-│   │   └── bitstamp.rs     Bitstamp impl
+│   │   ├── bitstamp.rs     Bitstamp impl
+│   │   └── kraken.rs       Kraken impl (see Kraken)
 │   ├── feed.rs             shared reconnect loop
 │   ├── merge.rs            the pure merge
 │   ├── aggregator.rs       state, publishes watch
