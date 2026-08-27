@@ -193,18 +193,22 @@ the way: connecting all clients at once reset most of them, while CPU sat
 idle — a connection burst, not a load problem. Spacing the connects out by
 5ms each fixed it; the table above is from the fixed version.
 
-**24-hour run: started 2026-08-26T13:09:46Z, commit `02754a4`, ran 32+
-hours.** Zero reconnects, zero errors — but that also means **Binance's
-documented 24h forced close never actually triggered in this run**; that
-specific claim stays unconfirmed here, not verified, and isn't restated as
-fact elsewhere in this README. p50 drifted from ~60µs to ~94µs over the
-run — real, not noise, cause not diagnosed (could be the accumulating
-histogram above, could be a genuine change in book activity). Duplicate
-rate drifted from ~15% to ~33% over the same window, likely market
-activity rather than anything in the code. This run is being superseded by
-a fresh one once the histogram windowing gap above is fixed, so these
-numbers won't be updated further — they're reported as what was actually
-observed, not smoothed into "stable" because that's what was expected.
+**First 24-hour run (commit `02754a4`, started 2026-08-26T13:09:46Z, ran
+32+ hours) — superseded, kept for the record.** Zero reconnects, zero
+errors, but Binance's documented 24h forced close never actually
+triggered; that claim stayed unconfirmed. p50 drifted from ~60µs to
+~94µs and duplicate rate from ~15% to ~33% over the run — both real,
+neither explained, and the p50 drift in particular is suspect now that
+the histogram is known to have been cumulative-not-windowed for that
+entire run (see above) rather than a genuine trend.
+
+**Second 24-hour run: started 2026-08-27T22:08:30Z, commit `19d4264`** —
+the tip with three venues (Kraken added) and the rolling-histogram fix
+both in. **Pending** — reconnect counts per venue (including whether
+Kraken's or Binance's connections close on their own this time), whether
+Binance's 24h close is observed, p50/p99/p99.9 behavior now that the
+histogram is windowed, peak RSS, and the full-run duplicate rate land here
+once it finishes.
 
 ## Design decisions
 
