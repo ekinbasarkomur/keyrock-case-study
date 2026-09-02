@@ -13,12 +13,8 @@ pub const ENV_PREFIX: &str = "KEYROCK_";
 pub struct Config {
     /// `RUST_LOG`-style filter, e.g. "info" or "keyrock_case_study=debug".
     pub log_level: String,
-    /// Address the service binds to.
-    ///
-    /// MUST be 0.0.0.0 inside a container: 127.0.0.1 in there is the
-    /// container's own loopback, so the published port would refuse every
-    /// connection while the logs look perfectly healthy. Exposure is limited
-    /// by the `127.0.0.1:` prefix on compose's `ports:` line, not by this.
+    /// Address the service binds to. Must be 0.0.0.0 inside a container —
+    /// 127.0.0.1 there refuses every outside connection.
     pub host: String,
     pub port: u16,
     /// Traded pair the aggregator streams, e.g. "ethbtc".
@@ -79,12 +75,7 @@ mod tests {
 
     #[test]
     fn invalid_port_is_an_error_not_a_fallback() {
-        // SAFETY: cargo test runs tests within a binary in parallel by default,
-        // so "no other test touches the environment concurrently" is not a
-        // guarantee — it happens to be true only because this is currently the
-        // one env-mutating test in this binary. If a second one is added, it
-        // needs its own synchronization (e.g. a shared mutex), not to inherit
-        // this comment's assumption.
+        // Mutates the environment — the only env-mutating test in this binary.
         unsafe { env::set_var("KEYROCK_PORT", "not-a-number") };
         let err = Config::from_env().unwrap_err();
         unsafe { env::remove_var("KEYROCK_PORT") };

@@ -1,27 +1,17 @@
-//! Binance `depth20@100ms` feed: the connect URL and the pure `parse`
-//! function, behind the `Exchange` trait. No websocket connection is opened
-//! here — that's `src/feed.rs::run_feed`'s job; this file proves `parse` is
-//! correct against fixtures first (see `specs/002-binance-feed/plan.md`).
+//! Binance `depth20@100ms` feed: connect URL and pure `parse` function
+//! behind the `Exchange` trait. No websocket connection opened here — see
+//! `src/feed.rs::run_feed`.
 
 use crate::exchange::{Exchange, Venue};
 use crate::model::{Book, Price};
 use serde::Deserialize;
 
-/// Binance's websocket host and port, named so `connect_url` and the proxy
-/// `CONNECT` tunnel (see `src/main.rs`) share one source instead of each
-/// hardcoding the pair separately.
 pub const HOST: &str = "stream.binance.com";
 pub const PORT: u16 = 9443;
 
-/// Binance's `depth20@100ms` payload shape. Only the fields this step needs
-/// are declared — `serde` ignores anything else Binance sends.
-///
-/// Borrows `bids`/`asks` straight out of the source JSON text instead of
-/// allocating a `String` per price/amount (~107 allocations per message down
-/// to ~27). The borrow must not outlive `parse()`: `Book` (what actually
-/// survives past this function, down the `mpsc`, into the aggregator) holds
-/// only `Price`/`Amount` — both `f64`-backed and `Copy` — never a `&str`, so
-/// the source text can drop once `parse()` returns.
+/// Binance's `depth20@100ms` payload shape. Borrows bids/asks straight out
+/// of the JSON text instead of allocating a String per value — the borrow
+/// doesn't outlive parse(), since Book only holds Copy f64-backed types.
 #[derive(Deserialize)]
 struct Depth20<'a> {
     #[serde(rename = "lastUpdateId")]
@@ -32,9 +22,8 @@ struct Depth20<'a> {
     asks: Vec<[&'a str; 2]>,
 }
 
-/// Binance's `Exchange` implementation. A unit struct — everything it needs
-/// (the host/port constants, the parse logic) is free-standing in this
-/// module already; the struct exists only to carry the trait impl.
+/// Binance's `Exchange` implementation. A unit struct — just carries the
+/// trait impl.
 pub struct Binance;
 
 impl Exchange for Binance {
@@ -57,15 +46,8 @@ impl Exchange for Binance {
         None
     }
 
-    /// Parses a raw websocket text message into a [`Book`].
-    ///
-    /// Returns `None` — never `Result` — for anything that isn't a
-    /// recognizable book payload: malformed JSON, a control/lifecycle
-    /// message like `{"e":"serverShutdown",...}`, or a price/amount string
-    /// that doesn't parse. A `?`-based `Result` here would let a stray
-    /// non-book message kill a future read loop; `Option` makes "that
-    /// wasn't a book" a normal, expected outcome (see
-    /// `specs/002-binance-feed/spec.md`, "Proposed Design").
+    /// Returns `None`, never `Err`, for anything that isn't a book payload
+    /// — malformed JSON, a control message, or a bad price/amount string.
     fn parse(&self, text: &str) -> Option<Book> {
         let parse_started_at = std::time::Instant::now();
 
@@ -90,9 +72,8 @@ impl Exchange for Binance {
     }
 }
 
-/// Converts `[price_str, amount_str]` pairs into `(Price, Amount)` levels.
-/// Returns `None` if any level fails to parse, rather than silently
-/// dropping a level and publishing a book with a hole in it.
+/// Converts `[price_str, amount_str]` pairs into levels. `None` if any
+/// level fails to parse, rather than publishing a book with a hole in it.
 fn parse_levels(levels: &[[&str; 2]]) -> Option<Vec<(Price, crate::model::Amount)>> {
     levels
         .iter()
@@ -170,14 +151,8 @@ mod tests {
         assert_eq!(Binance.subscribe_message("ethbtc"), None);
     }
 
-    /// Bug this catches: none — this locks in already-correct behaviour
-    /// rather than fixing one. `parse_levels`'s `.collect()` into
-    /// `Option<Vec<_>>` already short-circuits on the first unparseable
-    /// level, so one bad level rejects the *whole* message via the `?` in
-    /// `parse()` — matching the brief's own stated preference ("a missing
-    /// tick is honest; staleness picks up the slack") over silently
-    /// publishing a 19-level book with a hole in it. Confirmed here rather
-    /// than left as an unverified reading of the code.
+    /// One bad level rejects the whole message, rather than publishing a
+    /// book with a hole in it.
     #[test]
     fn one_malformed_bid_level_rejects_the_whole_message() {
         let raw = r#"{"lastUpdateId":1,"bids":[["0.03144000","36.35500000"],["not_a_number","1.00000000"]],"asks":[["0.03145000","37.64560000"]]}"#;
@@ -187,11 +162,7 @@ mod tests {
         );
     }
 
-    /// Bug this catches: an off-by-one or an `.unwrap()` on `.first()` in a
-    /// future change to `parse_levels` or its caller — would go unnoticed
-    /// until a real feed produced a genuinely one-sided book. `"bids": []`
-    /// is legal JSON and a plausible message from a venue in a strange
-    /// state.
+    /// An empty side ("bids": []) is legal JSON and must not panic.
     #[test]
     fn empty_bids_side_parses_without_panicking() {
         let raw = r#"{"lastUpdateId":1,"bids":[],"asks":[["0.03145000","37.64560000"]]}"#;

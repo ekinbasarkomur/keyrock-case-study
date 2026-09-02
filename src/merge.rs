@@ -1,13 +1,7 @@
-//! The real, two-book merge: combines every venue's book in the map into one
-//! publishable `Summary`.
+//! Merges every venue's book into one publishable `Summary`.
 //!
-//! No clock, no I/O, no channel reference — deliberately pure, per
-//! `specs/005-aggregator/spec.md` decision 6, so it can be unit tested
-//! against hand-built `Book` fixtures without faking a websocket. Three
-//! layers, each separately testable: `merge()` handles the edge cases and
-//! the spread; `merge_side()` walks all venues' cursors for one side;
-//! `Side::better()`/`Side::levels()` hold the one rule that differs between
-//! bids and asks.
+//! Pure — no clock, no I/O — so it's unit testable with hand-built `Book`
+//! fixtures, no websocket needed.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -18,10 +12,8 @@ use crate::orderbook::{Level, Summary};
 
 const TOP_N: usize = 10;
 
-/// Which side of the book is being merged. An enum, not a `bool` — a bool
-/// parameter is silently invertible with no compile error and would produce
-/// plausible-looking wrong numbers, the same silent-failure category this
-/// project has designed against since step 1.
+/// Which side of the book is being merged. An enum, not a bool — a bool
+/// param is silently invertible with no compile error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
     Bid,
@@ -29,10 +21,8 @@ pub enum Side {
 }
 
 impl Side {
-    /// Returns `Less` when `a` should come before `b` in this side's
-    /// ordering. Price direction depends on the side (asks ascending, bids
-    /// descending); the amount tie-break (larger first) is identical on
-    /// both sides — only the price rule inverts.
+    /// `Less` when `a` should come before `b`. Price direction inverts per
+    /// side; the amount tie-break (larger first) is the same on both.
     fn better(self, a: &(Price, Amount), b: &(Price, Amount)) -> Ordering {
         let (a_price, a_amount) = a;
         let (b_price, b_amount) = b;
@@ -52,24 +42,12 @@ impl Side {
     }
 }
 
-/// Merges one side (bids or asks) across every venue in `venues` into the
-/// top `TOP_N` levels, best first.
-///
-/// One `Peekable` cursor per venue, each already sorted (every venue hands
-/// over an already-sorted book) — repeatedly takes whichever cursor's front
-/// element is currently best, per `Side::better`, and advances only that
-/// cursor. `filter_map` drops exhausted cursors with no bounds checks; the
-/// `while out.len() < TOP_N` bound makes the cost independent of book depth.
-/// A min-heap would beat this past four or five venues; at two, it's more
-/// machinery than the problem has.
+/// Merges one side across every venue into the top `TOP_N` levels, best
+/// first. One cursor per venue; repeatedly takes whichever cursor's front
+/// element is best, per `Side::better`.
 fn merge_side(venues: &BTreeMap<Venue, &Book>, side: Side) -> Vec<Level> {
-    // `venues.iter()` walks the `BTreeMap` in `Venue`'s `Ord` order, so
-    // `cursors` is built in that same order. `min_by` returns the *first* of
-    // equal elements it sees, so a full price+amount tie between two venues
-    // resolves deterministically to whichever venue sorts first under
-    // `Venue`'s `Ord` (Binance) — not to run-to-run iteration order. This is
-    // the entire reason step 4 chose `BTreeMap` over `HashMap`; a `HashMap`
-    // here would make that tie flaky. Do not "simplify" this to `HashMap`.
+    // BTreeMap gives deterministic venue order — a full tie resolves to
+    // whichever venue sorts first (Binance), not random HashMap order.
     let mut cursors: Vec<_> = venues
         .iter()
         .map(|(venue, book)| (*venue, side.levels(book).iter().peekable()))
@@ -98,34 +76,19 @@ fn merge_side(venues: &BTreeMap<Venue, &Book>, side: Side) -> Vec<Level> {
     out
 }
 
-/// Merges every venue's book in `venues` into one `Summary`: the top 10 bids
-/// (highest first), the top 10 asks (lowest first), and the spread between
-/// them. Returns `None` if there's nothing publishable — no venues, or the
-/// merged book is one-sided — rather than a fabricated `0.0` spread, which
-/// would itself be a specific (and false) claim that the best bid and best
-/// ask sit at the same price.
-///
-/// No venues, a one-sided merged book, and a single live venue are all
-/// handled by the `?` on `.first()` below, with no explicit branch for any
-/// of them.
+/// Merges every venue's book into one `Summary`: top 10 bids, top 10 asks,
+/// and the spread. Returns `None` if nothing is publishable, rather than a
+/// fabricated `0.0` spread.
 pub fn merge(venues: &BTreeMap<Venue, &Book>) -> Option<Summary> {
     let bids = merge_side(venues, Side::Bid);
     let asks = merge_side(venues, Side::Ask);
 
     let (best_bid, best_ask) = (bids.first()?, asks.first()?);
 
-    // A crossed book (best ask below best bid, so `spread < 0.0`) is
-    // published as-is, not clamped or `abs()`-ed. Within one exchange this
-    // can't happen — its own matching engine would have already crossed the
-    // trade — but across two independently-matched venues it's routine, and
-    // represents a real (if fleeting) arbitrage opportunity worth reporting
-    // honestly rather than hiding.
-    // The spread is the only computed value on the wire — price and amount are
-    // parsed and passed through, so they round-trip exactly. Rounding to the
-    // venues' 8-decimal tick keeps 0.031505 - 0.031500 from publishing as
-    // 4.9999999999980616e-06. This is the boundary rounding that made
-    // fixed-point unnecessary internally. Rounding preserves sign, so a
-    // crossed (negative) spread stays negative.
+    // A crossed book (ask below bid) publishes as-is, negative spread and
+    // all — routine across two independently-matched venues, real signal.
+    // Round to the 8-decimal tick so e.g. 0.031505 - 0.031500 doesn't
+    // publish as 4.9999999999980616e-06.
     let spread = ((best_ask.price - best_bid.price) * 1e8).round() / 1e8;
 
     Some(Summary { spread, bids, asks })
@@ -135,10 +98,8 @@ pub fn merge(venues: &BTreeMap<Venue, &Book>) -> Option<Summary> {
 mod tests {
     use super::*;
 
-    /// Builds a `Book` from parallel lists of `(price_str, amount_str)`
-    /// pairs, in the order given — mirrors how a real parsed book already
-    /// arrives sorted, so tests control order explicitly rather than relying
-    /// on this helper to sort.
+    /// Builds a `Book` from parallel `(price_str, amount_str)` lists,
+    /// keeping the given order rather than sorting.
     fn book_from(bids: &[(&str, &str)], asks: &[(&str, &str)]) -> Book {
         let level = |(price, amount): &(&str, &str)| {
             (
@@ -150,15 +111,8 @@ mod tests {
             bids: bids.iter().map(level).collect(),
             asks: asks.iter().map(level).collect(),
             last_update_id: 1,
-            // `Book` gained these two required fields in 011-measurement
-            // (see src/model.rs) — every existing `Book { .. }` literal
-            // that doesn't use `..Default::default()` needs them to
-            // compile. merge()/merge_side() never read them (only
-            // bids/asks), so this is a compile-time fixture requirement
-            // only, not a change to any merge logic or a clock reaching
-            // merge() — the 011-measurement packet's own "zero diff on
-            // src/merge.rs" invariant was written before this was
-            // discovered to be structurally unavoidable.
+            // merge()/merge_side() only read bids/asks, not these — just a
+            // compile-time fixture requirement.
             parse_started_at: std::time::Instant::now(),
             parsed_at: std::time::Instant::now(),
         }

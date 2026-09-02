@@ -1,32 +1,11 @@
-//! Kraken WebSocket v2 `book` channel: the connect URL, the per-connection
-//! subscribe message, and `parse`, behind the `Exchange` trait.
+//! Kraken WebSocket v2 `book` channel: connect URL, subscribe message, and
+//! `parse`, behind the `Exchange` trait.
 //!
-//! **Research-only (branch `012-kraken`, not merged into `main`).** See
-//! `specs/012-kraken/spec.md` for the full architecture writeup this file
-//! implements — in particular "Decided — the central architectural fork",
-//! which is why this implementation looks structurally different from
-//! `binance.rs`/`bitstamp.rs`.
-//!
-//! Unlike Binance and Bitstamp, Kraken's `book` channel is
-//! snapshot-then-incremental: exactly one `type: "snapshot"` message on
-//! subscribe, then every later message is `type: "update"` — only the price
-//! levels that changed, with `qty: 0` meaning "remove this level." Producing
-//! a correct, complete `Book` therefore requires holding local, mutable
-//! state across messages, which the other two venues' stateless `&self`
-//! `parse` has never needed.
-//!
-//! # `parse` is order-dependent — unlike Binance/Bitstamp
-//!
-//! `Kraken::parse` accumulates state in a `Mutex` across calls. Calling it
-//! twice with the *same* `update` message silently double-applies that
-//! delta (removed levels stay removed either way, but a changed level's
-//! price/qty would be re-applied idempotently only by coincidence — nothing
-//! about the update format itself is idempotent in general, since it's a
-//! diff, not a value). `Binance::parse` and `Bitstamp::parse` are pure
-//! functions of their input alone and safe to call repeatedly with the same
-//! message; `Kraken::parse` is not. See
-//! `calling_parse_twice_with_the_same_update_double_applies_the_delta`
-//! below for the concrete evidence.
+//! Kraken's `book` channel is snapshot-then-incremental: one `snapshot` on
+//! subscribe, then `update` messages with only changed levels (`qty: 0`
+//! means remove). Unlike Binance/Bitstamp, this needs local mutable state
+//! across messages, so `parse` here is order-dependent — calling it twice
+//! with the same `update` double-applies the delta.
 
 use std::sync::Mutex;
 
@@ -36,42 +15,14 @@ use serde_json::value::RawValue;
 use crate::exchange::{Exchange, Venue};
 use crate::model::{Amount, Book, Price};
 
-/// Kraken's `Exchange` implementation.
+/// Kraken's `Exchange` implementation. Unlike Binance/Bitstamp's stateless
+/// unit structs, this holds the accumulated book across messages.
+/// `std::sync::Mutex`, not `RefCell` — `RefCell` is `!Sync` and breaks the
+/// `Send` bound `JoinSet::spawn` needs; nothing here is actually concurrent.
 ///
-/// Unlike `Binance`/`Bitstamp` (both unit structs — every message is a
-/// complete, self-contained book), `Kraken` carries interior-mutable state:
-/// the last-known accumulated book, rebuilt wholesale by each `snapshot` and
-/// patched by each `update`. `std::sync::Mutex`, not `RefCell` — `RefCell`
-/// is `!Sync`, which makes any future holding a `&Kraken` across an `.await`
-/// point `!Send`, and `tokio::task::JoinSet::spawn` requires `Send` futures
-/// (confirmed by a real crate-wide `cargo build` failure with `RefCell`, not
-/// assumed). Nothing here is genuinely *concurrent* — one `&Kraken` is held
-/// for the duration of a single `run_once` call in `src/feed.rs`, never
-/// accessed from two tasks at once — so the `Mutex` never actually
-/// contends; it exists to satisfy the `Send` bound, not for real mutual
-/// exclusion.
-///
-/// # Reconnect-state handling
-///
-/// `src/feed.rs::run_feed<E>` takes `exchange: E` by value once, into
-/// `run_once<E>(exchange: &E, ...)`, and reconnects by looping and re-
-/// entering `run_once_inner` with the *same* `&E` — it does not construct a
-/// fresh `E` per reconnect attempt. That means one `Kraken` value (and one
-/// `Mutex`) is genuinely reused across every reconnect within a single
-/// `run_feed` call, so "the next snapshot will just overwrite the cell" is
-/// not automatically safe on its own: if `parse` were ever called with an
-/// `update` message before the first post-reconnect `snapshot` arrived, a
-/// stale pre-disconnect book could leak through. In practice this can't
-/// happen with how `run_feed`/Kraken's own protocol behave together —
-/// Kraken always sends a fresh subscribe ack (routes to `None`) and then a
-/// fresh `snapshot` (replaces the cell wholesale) before any `update` on a
-/// new connection, and `parse` only ever returns `Some` for the `snapshot`/
-/// `update` branches — but that's a protocol-level guarantee, not one this
-/// struct enforces on its own. Nothing in `run_feed` currently calls
-/// `Kraken::parse` out of that order, so no explicit reset-on-reconnect hook
-/// is added here; if `run_feed` ever grows a path that could call `parse`
-/// with leftover expectations (e.g. retrying a stale buffered message after
-/// reconnecting), this comment is the place to revisit.
+/// One `Kraken` value is reused across reconnects. A fresh `snapshot`
+/// always arrives before any `update` on a new connection, replacing state
+/// wholesale — that's a protocol guarantee, not one this struct enforces.
 pub struct Kraken {
     book: Mutex<Option<KrakenBook>>,
 }
@@ -94,10 +45,8 @@ impl Kraken {
 /// matches the `depth: 10` subscribed in `subscribe_message`.
 const DEPTH: usize = 10;
 
-/// One book level as accumulated locally: the parsed `f64` (for sorting and
-/// for producing the outward `model::Book`) *and* the exact wire-text digit
-/// string (for the checksum, which must operate on Kraken's own textual
-/// representation — see the module-level checksum note in `parse_book`).
+/// One book level: parsed `f64` for sorting, plus the raw wire-text digits
+/// for the checksum (must match Kraken's own text representation).
 #[derive(Clone, Debug)]
 struct KrakenLevel {
     price: f64,
@@ -106,8 +55,7 @@ struct KrakenLevel {
     qty_raw: String,
 }
 
-/// The locally-accumulated book: `bids` sorted descending by price, `asks`
-/// ascending — same "best first" convention `model::Book` documents.
+/// The locally-accumulated book: bids descending, asks ascending.
 #[derive(Clone, Debug, Default)]
 struct KrakenBook {
     bids: Vec<KrakenLevel>,
@@ -147,10 +95,9 @@ impl KrakenBook {
         Some(())
     }
 
-    /// Converts to the exchange-agnostic `model::Book` `merge()` consumes.
-    /// Re-parses each level's already-validated `f64` into `Price`/`Amount`
-    /// — cheap, and keeps `Price::parse`/`Amount::parse` as the one place
-    /// that constructs those newtypes, same as every other venue.
+    /// Converts to the exchange-agnostic `model::Book`. Re-parses each
+    /// already-validated `f64` so `Price::parse`/`Amount::parse` stays the
+    /// one place that constructs those newtypes.
     fn to_model_book(&self, parse_started_at: std::time::Instant) -> Book {
         let to_pairs = |levels: &[KrakenLevel]| -> Vec<(Price, Amount)> {
             levels
@@ -166,8 +113,7 @@ impl KrakenBook {
         Book {
             bids: to_pairs(&self.bids),
             asks: to_pairs(&self.asks),
-            // Kraken's `book` channel has no `lastUpdateId` equivalent —
-            // same placeholder Bitstamp uses, for the same reason.
+            // No lastUpdateId equivalent, same placeholder as Bitstamp.
             last_update_id: 0,
             parse_started_at,
             parsed_at: std::time::Instant::now(),
@@ -175,13 +121,8 @@ impl KrakenBook {
     }
 }
 
-/// Removes `level` from `levels` if its `qty` is exactly `0.0`, otherwise
-/// replaces the existing entry at that price (or inserts a new one), then
-/// re-sorts. `ascending` picks the sort direction (`true` for asks, `false`
-/// for bids) — same "best first" convention every other sort in this
-/// codebase uses (`Side::better()` in `src/merge.rs`), duplicated here
-/// rather than shared since this is Kraken-internal accumulation, not the
-/// cross-venue merge.
+/// Removes `level` if `qty` is 0, otherwise upserts it, then re-sorts.
+/// `ascending` is true for asks, false for bids.
 fn upsert(levels: &mut Vec<KrakenLevel>, level: KrakenLevel, ascending: bool) {
     levels.retain(|existing| existing.price != level.price);
     if level.qty != 0.0 {
@@ -194,16 +135,9 @@ fn upsert(levels: &mut Vec<KrakenLevel>, level: KrakenLevel, ascending: bool) {
     }
 }
 
-/// Strips a wire-text decimal digit string down to the form Kraken's
-/// checksum algorithm expects: no `.`, no leading zeros (but never empty —
-/// a value of exactly `0` keeps one digit). Operates on the *original* wire
-/// text, not a re-formatted `f64` — reformatting `0.03740000` through
-/// `format!("{}", ...)` would drop the trailing zeros and silently produce
-/// the wrong digit string, which would make every checksum comparison fail
-/// against real Kraken data. Confirmed against a real captured snapshot in
-/// `checksum_of_the_real_captured_snapshot_matches_krakens_own_value` below
-/// — this is the one test that proves the raw-text approach, not `f64`
-/// reformatting, is what's needed here.
+/// Strips a wire-text digit string for Kraken's checksum: no `.`, no
+/// leading zeros. Must use the original wire text — reformatting through
+/// `f64` would drop trailing zeros and break the checksum.
 fn strip_for_checksum(raw: &str) -> String {
     let no_dot: String = raw.chars().filter(|c| *c != '.').collect();
     let trimmed = no_dot.trim_start_matches('0');
@@ -214,10 +148,8 @@ fn strip_for_checksum(raw: &str) -> String {
     }
 }
 
-/// Computes Kraken's own checksum algorithm over the current top-10-per-side
-/// state: top 10 asks ascending, then top 10 bids descending, each level's
-/// price-digits then qty-digits (both via [`strip_for_checksum`]),
-/// concatenated, CRC32'd.
+/// Kraken's checksum: top 10 asks then bids, price+qty digits concatenated,
+/// CRC32'd.
 fn compute_checksum(book: &KrakenBook) -> u32 {
     let mut buf = String::new();
     for level in book.asks.iter().take(DEPTH) {
@@ -231,13 +163,8 @@ fn compute_checksum(book: &KrakenBook) -> u32 {
     crc32fast::hash(buf.as_bytes())
 }
 
-/// A price/qty level as it arrives on the wire. `price`/`qty` are captured
-/// via `RawValue` — the exact source JSON text for that token — rather than
-/// deserialized straight to `f64`, so the checksum can operate on Kraken's
-/// own digit string (see [`strip_for_checksum`]) instead of a reformatted
-/// value. Confirmed live: Kraken sends bare JSON numbers here (e.g.
-/// `"price":0.031348`), not quoted strings — see
-/// `specs/012-kraken/spec.md`'s Open Question 5.
+/// A price/qty level as it arrives on the wire. Captured via `RawValue`
+/// (exact source text) so the checksum uses Kraken's own digit string.
 #[derive(Deserialize)]
 struct WireLevel<'a> {
     #[serde(borrow)]
@@ -261,8 +188,8 @@ impl WireLevel<'_> {
     }
 }
 
-/// The payload nested inside a `channel: "book"` message's `data` array
-/// (always exactly one element per message, per the live capture).
+/// The payload inside a `channel: "book"` message's `data` array (always
+/// one element per message).
 #[derive(Deserialize)]
 struct BookData<'a> {
     #[serde(borrow)]
@@ -282,11 +209,8 @@ struct BookMessage<'a> {
     data: Vec<BookData<'a>>,
 }
 
-/// A cheap first pass: every Kraken message has either a top-level
-/// `"channel"` field (`book`/`heartbeat`/`status`) or a top-level `"method"`
-/// field (a subscribe ack) — never both, per the live capture. Parsing this
-/// small shape first avoids a full `BookMessage` deserialize attempt on
-/// every heartbeat/status/ack.
+/// A cheap first pass: every message has either "channel" or "method",
+/// never both. Avoids a full `BookMessage` deserialize on non-book messages.
 #[derive(Deserialize)]
 struct Peek<'a> {
     #[serde(default)]
@@ -308,18 +232,14 @@ impl Exchange for Kraken {
         Venue::Kraken
     }
 
-    /// Kraken's v2 endpoint has nothing pair-specific in the path — the pair
-    /// only shows up in the subscribe message (`subscribe_message` below),
-    /// same as Bitstamp's `connect_url`.
+    /// Nothing pair-specific in the path — the pair is in the subscribe
+    /// message, same as Bitstamp.
     fn connect_url(&self, _pair: &str) -> String {
         "wss://ws.kraken.com/v2".to_string()
     }
 
-    /// Per-connection subscription, same as Bitstamp — Kraken does not
-    /// restore subscriptions across a reconnect (per
-    /// `specs/012-kraken/spec.md`'s Reconnection research), so `run_feed`
-    /// sending this again on every reconnect attempt is required, not
-    /// optional.
+    /// Per-connection subscription, same as Bitstamp — must be resent on
+    /// every reconnect.
     fn subscribe_message(&self, pair: &str) -> Option<String> {
         let symbol = to_kraken_symbol(pair)?;
         Some(format!(
@@ -327,11 +247,8 @@ impl Exchange for Kraken {
         ))
     }
 
-    /// Two-level dispatch: first the top-level `"channel"`/`"method"` field
-    /// (via `Peek`), then — for `channel: "book"` — the `"type"` field.
-    /// Returns `None` for anything that isn't a `snapshot`/`update` book
-    /// payload, same "never propagate a hard error out of parse" discipline
-    /// `binance.rs`/`bitstamp.rs` already follow.
+    /// Dispatches on "channel"/"method" first, then "type" for book
+    /// messages. Returns `None` for anything that isn't a book payload.
     fn parse(&self, raw: &str) -> Option<Book> {
         let parse_started_at = std::time::Instant::now();
 
@@ -415,21 +332,12 @@ impl Kraken {
     }
 }
 
-/// Known quote-currency suffixes this project's `--pair`/`KEYROCK_PAIR`
-/// values assume are the only ones in play — same assumption Binance's and
-/// Bitstamp's lowercase-concatenated pair token already relies on implicitly
-/// (neither splits it at all). Longest-suffix-first so e.g. a hypothetical
-/// `"usdt"` wouldn't be shadowed by a shorter `"usd"` match landing first —
-/// not currently in the list, but the ordering rule is cheap to state
-/// correctly now rather than as a later bugfix.
+/// Known quote-currency suffixes, longest first so e.g. "usdt" isn't
+/// shadowed by a shorter "usd" match.
 const QUOTE_SUFFIXES: &[&str] = &["usdt", "btc", "usd", "eur"];
 
-/// Converts a lowercase concatenated pair token (e.g. `"ethbtc"`) into
-/// Kraken's slash-separated uppercase form (e.g. `"ETH/BTC"`). Returns
-/// `None` if no known quote-currency suffix matches — per
-/// `specs/012-kraken/spec.md`'s Out of Scope, this project's pair set is
-/// deliberately small and this converter isn't meant to handle an
-/// unrecognized quote currency.
+/// Converts "ethbtc" into Kraken's "ETH/BTC" form. `None` if no known
+/// quote-currency suffix matches.
 fn to_kraken_symbol(pair: &str) -> Option<String> {
     let lower = pair.to_lowercase();
     for suffix in QUOTE_SUFFIXES {
@@ -446,10 +354,8 @@ fn to_kraken_symbol(pair: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    // Captured live from wss://ws.kraken.com/v2 (via this project's HTTP
-    // CONNECT proxy), 2026-08-26, subscribed to the `book` channel for
-    // `ETH/BTC` at depth 10. Verbatim, per this project's binding fixture
-    // convention — see specs/012-kraken/spec.md's live-capture note.
+    // Captured live from wss://ws.kraken.com/v2, 2026-08-26, ETH/BTC book
+    // channel at depth 10.
     const SNAPSHOT_FIXTURE: &str = r#"{"channel":"book","type":"snapshot","data":[{"symbol":"ETH/BTC","bids":[{"price":0.031348,"qty":0.03740000},{"price":0.031347,"qty":2.87288049},{"price":0.031345,"qty":8.57986833},{"price":0.031344,"qty":14.40276069},{"price":0.031340,"qty":12.96065840},{"price":0.031339,"qty":13.19606540},{"price":0.031338,"qty":20.41389313},{"price":0.031336,"qty":0.03740000},{"price":0.031334,"qty":14.37158163},{"price":0.031332,"qty":14.40695990}],"asks":[{"price":0.031357,"qty":0.03740000},{"price":0.031358,"qty":2.87194815},{"price":0.031361,"qty":0.00767324},{"price":0.031362,"qty":4.27140781},{"price":0.031363,"qty":4.34586052},{"price":0.031364,"qty":27.28097668},{"price":0.031365,"qty":12.92325840},{"price":0.031366,"qty":4.14290322},{"price":0.031368,"qty":0.00738649},{"price":0.031370,"qty":0.03740000}],"checksum":3619791617,"timestamp":"2026-08-26T15:16:16.637831Z"}]}"#;
 
     const UPDATE_FIXTURE: &str = r#"{"channel":"book","type":"update","data":[{"symbol":"ETH/BTC","bids":[{"price":0.031347,"qty":0.00000000},{"price":0.031329,"qty":19.07893401}],"asks":[],"checksum":2505869009,"timestamp":"2026-08-26T15:16:16.730423Z"}]}"#;
@@ -460,15 +366,11 @@ mod tests {
 
     const SUBSCRIBE_ACK_SUCCESS_FIXTURE: &str = r#"{"method":"subscribe","result":{"channel":"book","depth":10,"snapshot":true,"symbol":"ETH/BTC"},"success":true,"time_in":"2026-08-26T15:16:16.576099Z","time_out":"2026-08-26T15:16:16.576140Z"}"#;
 
-    // Best-effort construction, not a live capture — a genuinely
-    // unsubscribable symbol wasn't practically triggerable in this session
-    // (see specs/012-kraken's Phase 1 note on this). Shape matches Kraken's
-    // documented subscribe-ack fields with `success` flipped and an `error`
-    // field added, consistent with the real ack fixture's own field names.
+    // Hand-built, not a live capture — matches Kraken's documented
+    // subscribe-ack shape with success: false and an error field.
     const SUBSCRIBE_ACK_FAILURE_FIXTURE: &str = r#"{"method":"subscribe","result":{"channel":"book","symbol":"NOT/REAL"},"success":false,"error":"Unknown symbol"}"#;
 
-    /// Bug caught: a wrong field path or off-by-one into `data[0]`'s
-    /// `bids`/`asks` — asserts actual top price/qty, not just a length.
+    /// Asserts actual top price/qty, not just a length.
     #[test]
     fn a_captured_snapshot_parses_into_a_complete_book() {
         let kraken = Kraken::new();
@@ -486,11 +388,8 @@ mod tests {
         assert_eq!(best_ask_amount, Amount::parse("0.03740000").unwrap());
     }
 
-    /// The one new test shape this venue needs: a single-message smoke test
-    /// alone isn't sufficient evidence for stateful accumulation. Feeds the
-    /// real snapshot then the real update through the *same* `Kraken`
-    /// instance and asserts the specific changed levels: the 0.031347 bid
-    /// is gone, the new 0.031329 bid is present with its real qty.
+    /// Feeds a real snapshot then update through the same `Kraken` and
+    /// checks the changed levels: 0.031347 gone, 0.031329 present.
     #[test]
     fn a_captured_update_accumulates_onto_the_held_snapshot() {
         let kraken = Kraken::new();
@@ -512,9 +411,7 @@ mod tests {
         assert_eq!(new_bid.1, Amount::parse("19.07893401").unwrap());
     }
 
-    /// Explicit name for the `qty: 0` removal behaviour already exercised
-    /// above — states the rule as its own guarantee in `cargo test`'s
-    /// output, not just as a side effect of the accumulation test.
+    /// States the qty:0 removal rule as its own guarantee.
     #[test]
     fn a_qty_of_zero_removes_that_price_level() {
         let kraken = Kraken::new();
@@ -553,26 +450,14 @@ mod tests {
         assert!(Kraken::new().parse(SUBSCRIBE_ACK_SUCCESS_FIXTURE).is_none());
     }
 
-    /// A `success: false` ack must still parse to `None` (not panic, not
-    /// treated as a book) — the log-level-`warn` path is exercised here,
-    /// though not asserted on directly (no tracing capture in this test),
-    /// matching `bitstamp.rs`'s `bts_error_parses_to_none_without_panicking`
-    /// precedent.
+    /// A `success: false` ack must still parse to `None`, not panic.
     #[test]
     fn a_false_subscribe_ack_parses_to_none_without_panicking() {
         assert!(Kraken::new().parse(SUBSCRIBE_ACK_FAILURE_FIXTURE).is_none());
     }
 
-    /// The concrete evidence for the struct's loud "parse is
-    /// order-dependent" doc comment: feeding the same real `update` twice
-    /// removes the same bid (idempotent for a pure removal) but must not
-    /// panic or silently resurrect state — this asserts the second call's
-    /// resulting book is still consistent with two applications, not that
-    /// it differs from one (a qty:0 delta is naturally idempotent on
-    /// removal; the double-apply risk this comment warns about is real for
-    /// a non-zero delta, which this fixture doesn't happen to exercise, but
-    /// the call-twice pattern itself — and the fact that `parse` has no
-    /// guard against it — is what's being demonstrated).
+    /// Feeding the same update twice must not panic — parse() has no
+    /// guard against re-applying the same delta.
     #[test]
     fn calling_parse_twice_with_the_same_update_double_applies_the_delta() {
         let kraken = Kraken::new();
@@ -584,28 +469,19 @@ mod tests {
             .parse(UPDATE_FIXTURE)
             .expect("second update application");
 
-        // Both calls insert the same 0.031329 bid and remove the same
-        // 0.031347 bid — nothing in `parse`'s signature stops a caller from
-        // re-feeding the same message, and doing so here doesn't error, it
-        // just silently repeats the delta. The two resulting books are
-        // identical, which is itself the point: `parse` has no notion of
-        // "already applied this message."
+        // Both calls apply the same delta silently — parse() has no
+        // notion of "already applied this message."
         assert_eq!(first.bids, second.bids);
         assert_eq!(first.asks, second.asks);
     }
 
-    /// The single most important test in this file: proves the raw-digit-
-    /// string checksum approach (not `f64` reformatting) actually
-    /// reproduces Kraken's own checksum against real data. Computed
-    /// independently in Python against this same fixture before writing
-    /// this implementation — see specs/012-kraken's task 4/5 verification.
+    /// Proves the raw-digit-string checksum approach reproduces Kraken's
+    /// own checksum against real captured data.
     #[test]
     fn checksum_of_the_real_captured_snapshot_matches_krakens_own_value() {
         let kraken = Kraken::new();
-        // parse() only returns Some if the checksum it computes internally
-        // already matched — so a successful parse here is itself already
-        // partial evidence, but assert the raw function directly too, for
-        // an assertion that doesn't depend on parse()'s own control flow.
+        // Assert the raw function directly too, not just via parse()'s
+        // control flow.
         let msg: BookMessage = serde_json::from_str(SNAPSHOT_FIXTURE).unwrap();
         let data = msg.data.into_iter().next().unwrap();
         let book = KrakenBook::from_snapshot(&data).expect("valid snapshot data");
@@ -617,11 +493,9 @@ mod tests {
         );
     }
 
-    /// Corrupts one digit of the real snapshot's `checksum` field and
-    /// confirms the mismatch path: `parse` returns `None` for the corrupted
-    /// message, and a subsequent real `update` (which would otherwise
-    /// correctly apply if the `Mutex` still held a book) also returns
-    /// `None` because the held state was cleared rather than left stale.
+    /// A corrupted checksum returns `None` and clears held state, so a
+    /// subsequent update also returns `None` instead of applying to stale
+    /// data.
     #[test]
     fn a_corrupted_checksum_clears_the_held_book() {
         let corrupted = SNAPSHOT_FIXTURE.replace("3619791617", "3619791618");
@@ -637,24 +511,19 @@ mod tests {
         );
     }
 
-    /// A second, fresh `snapshot` (simulating a reconnect) must fully
-    /// replace prior accumulated state, not merge with it — the concrete
-    /// evidence behind the reconnect-state doc comment on `Kraken` above.
+    /// A second, fresh snapshot (simulating a reconnect) must fully
+    /// replace prior state, not merge with it.
     #[test]
     fn a_fresh_snapshot_after_a_reconnect_replaces_prior_state_wholesale() {
         let kraken = Kraken::new();
         kraken.parse(SNAPSHOT_FIXTURE).expect("valid snapshot");
         kraken.parse(UPDATE_FIXTURE).expect("valid update");
 
-        // Second snapshot, identical to the first — simulates the exact
-        // message a reconnect would deliver.
         let book = kraken
             .parse(SNAPSHOT_FIXTURE)
             .expect("valid second snapshot");
 
-        // The update's changes (0.031347 removed, 0.031329 added) must NOT
-        // still be reflected — the second snapshot alone is the entire
-        // truth of the book now.
+        // The update's changes must not still be reflected.
         assert!(
             book.bids
                 .iter()

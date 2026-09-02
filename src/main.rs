@@ -1,26 +1,12 @@
 //! keyrock-case-study — CLI entry point.
 //!
-//! Deliberately thin: parse arguments, initialise logging, delegate. Anything
-//! worth testing belongs in the library crate (`src/lib.rs`), which the
-//! integration tests in `tests/` can actually reach.
+//! Deliberately thin: parse arguments, initialise logging, delegate.
+//! Everything testable lives in the library crate.
 //!
-//! Research-only (branch `012-kraken`, not merged into `main`): a third feed
-//! task (`feed::run_feed::<Kraken>`) is spawned below, alongside the
-//! Binance/Bitstamp pair the rest of this comment describes — see
-//! `specs/012-kraken/spec.md`.
-//!
-//! Four tasks run concurrently from here: the Binance and Bitstamp feeds
-//! (`feed::run_feed::<Binance>` and `feed::run_feed::<Bitstamp>` — the
-//! generic driver loop shared by every `Exchange` implementation lives in
-//! `src/feed.rs`, not here; this file only constructs each `Exchange` impl
-//! and spawns it, both sending into the same `mpsc::Sender`), the
-//! aggregator task (`aggregator::run`, step 3 — owns per-venue book state,
-//! calls `merge::summarise`, publishes into the watch channel), and the
-//! gRPC server (`server::router(rx).serve(addr)`). See the `JoinSet` loop at
-//! the bottom of [`main`] for why all four are supervised together rather
-//! than run sequentially or fire-and-forgotten. gRPC output stays
-//! single-venue this step (`summarise` reads the map's lowest-ordered
-//! entry) — real two-book merging is step 5.
+//! Four tasks run concurrently: the Binance, Bitstamp, and Kraken feeds
+//! (`feed::run_feed`, one generic driver loop shared by every venue), the
+//! aggregator task, and the gRPC server. Supervised together via `JoinSet`
+//! at the bottom of `main` — see that loop's comment for why.
 
 use std::net::SocketAddr;
 
@@ -39,10 +25,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 
-/// Which of the four supervised tasks a [`TaskResult`] came from. Carries a
-/// `Venue` for the feed variant since there are two feed tasks — `JoinSet`
-/// itself doesn't tell you which task ended, unlike `select!`'s branches, so
-/// the identity has to travel alongside the result.
+/// Which supervised task a `TaskResult` came from. `JoinSet` doesn't tell
+/// you which task ended, so the identity travels with the result.
 #[derive(Debug, Clone, Copy)]
 enum Component {
     Feed(Venue),
@@ -50,9 +34,8 @@ enum Component {
     Server,
 }
 
-/// What every spawned task normalises its outcome into before the
-/// `JoinSet` sees it, so `join_next()` can be awaited in a single loop
-/// regardless of which task actually finished.
+/// Normalized outcome every spawned task produces, so `join_next()` can be
+/// awaited in one loop regardless of which task finished.
 type TaskResult = (Component, Result<()>);
 
 #[derive(Parser)]
@@ -72,8 +55,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut config = Config::from_env()?;
 
-    // CLI flags are the more specific, closer-to-the-call-site input, so
-    // they win over the env-sourced value when both are given.
+    // CLI flags win over env-sourced values when both are given.
     if let Some(pair) = cli.pair {
         config.pair = pair;
     }
@@ -85,12 +67,9 @@ async fn main() -> Result<()> {
 
     info!(pair = %config.pair, port = %config.port, "starting");
 
-    // rustls 0.23+ no longer picks a `CryptoProvider` implicitly from Cargo
-    // features alone — the process must install one before the first TLS
-    // handshake, or `connect_async` panics deep inside rustls with an
-    // unhelpful message. `tokio-tungstenite`'s `rustls-tls-webpki-roots`
-    // feature resolves `ring` as the provider; this just activates it. Must
-    // happen once, in `main`, before any task that might dial TLS is spawned.
+    // rustls 0.23+ needs an explicit CryptoProvider install before the
+    // first TLS handshake, or connect_async panics. Must run once, before
+    // any TLS-dialing task is spawned.
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("no CryptoProvider installed yet — this is the first call");
@@ -99,15 +78,11 @@ async fn main() -> Result<()> {
         .parse()
         .with_context(|| format!("invalid bind address {}:{}", config.host, config.port))?;
 
-    // `None` until the aggregator's first published summary —
-    // `server::router`'s stream filters that case out rather than
-    // publishing a fabricated empty `Summary`.
+    // None until the aggregator's first published summary.
     let (tx, rx) = watch::channel(None);
 
-    // Bounded, not unbounded: an unbounded channel would hide backpressure
-    // (a stuck aggregator silently growing memory instead of visibly
-    // slowing the feed) — see `specs/005-aggregator/spec.md` decision 1. 32
-    // gives slack for a brief lag without hiding a genuinely stuck consumer.
+    // Bounded, not unbounded — an unbounded channel would hide backpressure
+    // instead of visibly slowing the feed. 32 gives slack for a brief lag.
     let (feed_tx, feed_rx) = mpsc::channel::<(Venue, Book)>(32);
 
     let pair = config.pair.clone();
@@ -115,10 +90,8 @@ async fn main() -> Result<()> {
     let bitstamp_tx = feed_tx.clone();
     let kraken_tx = feed_tx;
 
-    // Every task is wrapped in an async block that tags its outcome with a
-    // `Component` before handing it to the `JoinSet` — a `JoinSet` (unlike
-    // `select!`'s branches) doesn't tell you which task finished on its own,
-    // so the identity has to travel inside the result itself.
+    // Each task tags its outcome with a Component before handing it to
+    // the JoinSet, since JoinSet alone doesn't say which task finished.
     let mut tasks: JoinSet<TaskResult> = JoinSet::new();
     let binance_pair = pair.clone();
     let bitstamp_pair = pair.clone();
@@ -131,9 +104,6 @@ async fn main() -> Result<()> {
         let res = feed::run_feed(Bitstamp, bitstamp_pair, bitstamp_tx).await;
         (Component::Feed(Venue::Bitstamp), res)
     });
-    // Research-only (012-kraken, not merged into main) — see
-    // specs/012-kraken/spec.md. Structurally identical to the two spawns
-    // above; `feed::run_feed<E>` never branches on which venue it's driving.
     tasks.spawn(async move {
         let res = feed::run_feed(Kraken::new(), pair, kraken_tx).await;
         (Component::Feed(Venue::Kraken), res)
@@ -150,21 +120,9 @@ async fn main() -> Result<()> {
         (Component::Server, res)
     });
 
-    // Await the `JoinSet`, not sequential `.await`s and not detached spawns
-    // with dropped handles:
-    //   - Sequential `.await`s would never reach the second/third task while
-    //     the first is still running, so a dead gRPC server behind a live
-    //     feed (or vice versa) would go unnoticed indefinitely.
-    //   - Dropping the handles would detach the tasks; a panic in any one of
-    //     them would print nothing and `main` could still return exit 0 with
-    //     nothing actually running.
-    // A server serving a dead feed publishes stale prices under a
-    // "still live" appearance, which is worse than the process not running
-    // at all — so the moment any one task ends, the whole process ends,
-    // propagating that task's error (or exiting cleanly if it ended without
-    // one). This is identical to the `select!` policy it replaces: no
-    // feed-specific carve-out yet (that lands in a later step of this
-    // packet), just a supervisor shape that can express one later.
+    // Await the JoinSet, not sequential awaits or detached spawns — the
+    // moment any one task ends, the whole process ends. A server serving a
+    // dead feed publishing stale prices is worse than not running at all.
     match tasks.join_next().await {
         Some(Ok((component, Ok(())))) => {
             match component {
@@ -188,9 +146,8 @@ async fn main() -> Result<()> {
             Err(join_err).context("task was cancelled")
         }
         None => {
-            // Unreachable in practice — four tasks were just spawned above —
-            // but `join_next()` returns `Option`, so handle it rather than
-            // `unwrap()` on something that isn't provably local here.
+            // Unreachable — tasks were just spawned above — but join_next()
+            // returns Option, so handle it rather than unwrap().
             info!("task set was empty");
             Ok(())
         }

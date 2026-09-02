@@ -1,12 +1,7 @@
 //! Integration tests: the real binary, invoked as a subprocess.
 //!
-//! These are the truth anchor. Unit tests prove functions behave; these prove
-//! the shipped artefact behaves — argument parsing, exit codes, config/CLI
-//! precedence, and the stdout/stderr split included.
-//!
-//! `env!("CARGO_BIN_EXE_<name>")` is resolved by Cargo at compile time and
-//! points at the binary built for THIS test run. Hardcoding `target/debug/...`
-//! silently tests a stale binary once anyone runs `--release`.
+//! Proves the shipped artefact behaves — argument parsing, exit codes,
+//! config/CLI precedence, stdout/stderr split.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -15,21 +10,12 @@ use std::time::Duration;
 
 const BIN: &str = env!("CARGO_BIN_EXE_keyrock-case-study");
 
-// As of Phase 3 of specs/002-binance-feed, `main` connects to Binance and
-// loops forever reading the websocket — there is no bounded-run mode. That
-// rules out `Command::output()` (which waits for exit) as a way to observe
-// the config/CLI-precedence startup log line. Per revisions.md entry 4, the
-// fix is to spawn the child with piped stderr and read lines until the
-// `starting pair=... port=...` line appears, then kill the child — no mock
-// server and no bounded-run flag needed, because that line is written
-// before the connect attempt, so this works identically whether or not the
-// process can actually reach Binance.
+// main loops forever, so Command::output() (waits for exit) can't observe
+// the startup log line — spawn with piped stderr, read until it appears,
+// then kill the child.
 
-/// Spawns `BIN` with the given env vars and args, reads stderr lines (off a
-/// background thread, so a hang can't block the test forever) until one
-/// contains `needle` or `timeout` elapses, then kills the child. Returns the
-/// lines captured so far, panicking with them on timeout for a clear
-/// failure message.
+/// Spawns `BIN`, reads stderr lines off a background thread until one
+/// contains `needle` or `timeout` elapses, then kills the child.
 fn spawn_and_capture_stderr_until(
     envs: &[(&str, &str)],
     args: &[&str],
@@ -83,10 +69,8 @@ fn spawn_and_capture_stderr_until(
 
 #[test]
 fn default_run_logs_defaults_with_empty_stdout() {
-    // stdout can't be asserted precisely here — unlike `Command::output()`,
-    // a still-running child has no captured stdout to inspect after the
-    // fact. The stdout/stderr split is still covered structurally: every
-    // assertion below reads exclusively from the stderr handle.
+    // A still-running child has no captured stdout to inspect, but every
+    // assertion below reads exclusively from stderr, covering the split.
     let (mut child, captured) =
         spawn_and_capture_stderr_until(&[], &[], "port=50051", Duration::from_secs(5));
     let joined = captured.join("\n");
@@ -128,8 +112,7 @@ fn env_vars_override_defaults_with_no_flags() {
 
 #[test]
 fn cli_flag_wins_over_env_var_for_port() {
-    // The actual precedence regression test: KEYROCK_PORT and --port both
-    // set, to different values — the flag must win.
+    // KEYROCK_PORT and --port both set, to different values — flag must win.
     let (mut child, captured) = spawn_and_capture_stderr_until(
         &[("KEYROCK_PORT", "1")],
         &["--port", "12345"],

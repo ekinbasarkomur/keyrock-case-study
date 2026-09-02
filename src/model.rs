@@ -1,29 +1,18 @@
 //! Price/amount newtypes and the exchange-agnostic `Book`.
 //!
-//! `Price`/`Amount` wrap `f64` rather than a bare `f64` for two reasons: the
-//! newtype boundary makes the compiler reject passing an `Amount` where a
-//! `Price` is expected, and `Ord` via [`f64::total_cmp`] gives a well-defined
-//! total order for sorting without an ad-hoc comparator at each call site.
-//! Fixed-point was measured (see `specs/002-binance-feed/revisions.md`) and
-//! isn't earning its complexity at this scale — it would be the right choice
-//! in a system whose arithmetic accumulates across many updates.
+//! `Price`/`Amount` wrap `f64` so the compiler rejects mixing them up, and
+//! `Ord` via `f64::total_cmp` gives a well-defined sort order.
 
 use std::cmp::Ordering;
 use std::fmt;
 use std::time::Instant;
 
 /// A price, parsed directly from the exchange's decimal string.
-///
-/// Distinct from [`Amount`] so the compiler rejects passing one where the
-/// other is expected.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Price(f64);
 
 /// An amount (order size), parsed directly from the exchange's decimal
 /// string.
-///
-/// Distinct from [`Price`] so the compiler rejects passing one where the
-/// other is expected.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Amount(f64);
 
@@ -85,10 +74,8 @@ impl fmt::Display for Amount {
     }
 }
 
-// The gRPC wire schema (`proto/orderbook.proto`) fixes `Level.price`/
-// `Level.amount` as `double` — these are the one conversion point where a
-// `Price`/`Amount` becomes a bare `f64`, per the "convert at the boundary"
-// rule. `src/merge.rs` is the only caller.
+// The gRPC schema fixes Level.price/amount as double — this is the one
+// conversion point where Price/Amount become a bare f64.
 impl From<Price> for f64 {
     fn from(price: Price) -> Self {
         price.0
@@ -103,20 +90,14 @@ impl From<Amount> for f64 {
 
 /// An exchange-agnostic order book snapshot: bids and asks, each already
 /// ordered best-first, plus the venue's own update sequence number.
-///
-/// Nothing Binance-specific lives here — that's `src/exchange/binance.rs`'s
-/// job (landing in the next phase).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Book {
     pub bids: Vec<(Price, Amount)>,
     pub asks: Vec<(Price, Amount)>,
     pub last_update_id: u64,
-    /// When this book's parse began, stamped as the first statement in the
-    /// owning `Exchange::parse` — before `serde_json::from_str` runs. Feeds
-    /// `src/aggregator.rs`'s parse-span histogram (see `specs/011-measurement`).
+    /// When parsing began — stamped before serde_json::from_str runs.
     pub parse_started_at: Instant,
-    /// When this book's parse succeeded, stamped immediately before the
-    /// `Some(Book { .. })` return — never set on an early `None` return.
+    /// When parsing succeeded — stamped just before returning Some(Book).
     pub parsed_at: Instant,
 }
 
@@ -132,12 +113,7 @@ mod tests {
         assert_eq!(price.to_string(), "0.03150000");
     }
 
-    /// A `Vec<Price>` built from out-of-order strings sorts ascending by
-    /// value under `.sort()`. Catches a flipped comparator (e.g.
-    /// `other.cmp(self)`) or a `PartialOrd`/`Ord` impl that silently
-    /// disagrees with each other — either would sort the wrong direction
-    /// or panic, and step 5's `merge()` sorts bids/asks entirely by this
-    /// `Ord` impl.
+    /// Out-of-order price strings sort ascending by value under `.sort()`.
     #[test]
     fn prices_sort_ascending_by_value() {
         let mut prices: Vec<Price> = ["0.0320", "0.0100", "0.0315", "0.0001"]
@@ -152,12 +128,7 @@ mod tests {
         );
     }
 
-    /// Two `Price`s parsed from the same string compare `Ordering::Equal`,
-    /// and neither is less than the other. Catches a `total_cmp` misuse
-    /// that breaks reflexivity for equal values — `total_cmp` exists
-    /// precisely to give a well-defined order even where `PartialOrd`
-    /// wouldn't (NaN, signed zero), and a broken impl here would silently
-    /// violate the total order that sorting depends on.
+    /// Two Prices parsed from the same string compare Equal.
     #[test]
     fn equal_prices_compare_equal() {
         let a = Price::parse("0.03150000").expect("valid decimal string");
@@ -167,17 +138,8 @@ mod tests {
         assert!(!(b < a));
     }
 
-    /// A deliberate accept-and-document decision, not an oversight: `parse`
-    /// reads wire data and reports what the venue sent — it does not enforce
-    /// domain rules like "a price must be positive." No real market state
-    /// produces a negative price, so a corrupted frame carrying one would
-    /// sort to the front of the book and propagate all the way to gRPC
-    /// clients unfiltered; staleness doesn't catch this either, since the
-    /// venue is actively publishing, just publishing nonsense. Validation
-    /// against domain rules belongs a layer above the parser that doesn't
-    /// exist in this codebase today — see README.md's "What I'd change for
-    /// production" table. This test locks in the current, chosen behaviour
-    /// rather than leaving it an unverified assumption.
+    /// Deliberate: parse reports what the venue sent, doesn't validate
+    /// domain rules like "price must be positive."
     #[test]
     fn a_negative_price_string_is_accepted_not_rejected() {
         assert!(Price::parse("-0.001").is_some());

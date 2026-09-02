@@ -1,14 +1,8 @@
-//! keyrock-case-study client — a demonstration terminal viewer.
+//! keyrock-case-study client — a terminal viewer for the gRPC stream.
 //!
-//! Connects to the gRPC server (`src/server.rs`) and redraws the combined
-//! book in place, like `top`. This is not part of the service — it exists
-//! so a reviewer can see the merged book without `grpcurl`, and so step 7's
-//! reconnection/staleness work has an instrument that makes it visible on
-//! screen rather than only in logs.
-//!
-//! Reachable via `keyrock_case_study::orderbook`, the generated proto module
-//! `src/lib.rs` already re-exports — no library change was needed to add
-//! this binary.
+//! Connects to `src/server.rs` and redraws the combined book in place, like
+//! `top`. Not part of the service — just lets a reviewer see the merged
+//! book without `grpcurl`.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write};
@@ -24,15 +18,11 @@ use tokio::time::sleep;
 use tokio_stream::StreamExt;
 use tracing::{info, warn};
 
-/// Rows rendered per side. Fewer real levels than this leave the remaining
-/// rows blank rather than collapsing the layout, so nothing jumps between
-/// frames.
+/// Rows rendered per side. Fewer real levels leave blank rows so nothing
+/// jumps between frames.
 const ROWS: usize = 10;
 
-/// Both venues this project drives, declared once here rather than
-/// hardcoded into the header string — so step 7 can attach per-venue status
-/// (see spec.md's "design for step 7") by extending what `render` does with
-/// this list, not by restructuring its signature.
+/// All venues this project drives.
 const VENUES: [Venue; 3] = [Venue::Binance, Venue::Bitstamp, Venue::Kraken];
 
 #[derive(Parser)]
@@ -43,13 +33,10 @@ struct Cli {
     addr: String,
 }
 
-/// Tracks what the render loop needs across frames: how many `Summary`
-/// messages have arrived, and a rolling messages/second rate.
+/// Message count and rolling messages/second rate across frames.
 struct Stats {
     count: u64,
     rate: f64,
-    /// When `rate` was last recomputed, and the count at that time — the
-    /// rolling rate is `(count - count_at_last_calc) / elapsed`.
     last_calc: Instant,
     count_at_last_calc: u64,
 }
@@ -64,15 +51,8 @@ impl Stats {
         }
     }
 
-    /// Records one received message and, if enough time has passed,
-    /// recomputes the rolling rate.
-    ///
-    /// Guarded against a near-zero elapsed interval: on the very first call
-    /// (or any call arriving in the same instant as the last recompute),
-    /// `elapsed` can be ~0, and `count / elapsed` would print `inf`/`NaN` on
-    /// screen. Holding the last computed rate (0.0 initially) until a
-    /// meaningful interval has passed avoids that without a special case at
-    /// render time.
+    /// Records one message; recomputes the rolling rate if enough time has
+    /// passed (guards against a near-zero elapsed interval producing NaN).
     fn record(&mut self) {
         self.count += 1;
         let elapsed = self.last_calc.elapsed().as_secs_f64();
@@ -84,27 +64,16 @@ impl Stats {
     }
 }
 
-/// Client-side per-venue last-seen-in-a-frame tracking, used to render the
-/// header's `● ` / `○ stale <Ns>` status.
-///
-/// This is **not** the server's staleness state from step 7's aggregator
-/// (`src/aggregator.rs`'s `Venue::staleness_threshold`) — `Summary` carries
-/// no venue-health field, and the `.proto` stays untouched (see spec.md's
-/// Invariants), so the client can only infer health from which venues'
-/// levels actually show up in each streamed frame. The two numbers measure
-/// different events (server: last message *received* from the venue;
-/// client: last *frame* whose top-10 contained that venue's levels) and the
-/// client's figure therefore runs slightly behind the server's — by roughly
-/// one publish interval — not because either is wrong. See README's
-/// "Client-side status" note.
+/// Client-side per-venue last-seen tracking for the `●`/`○ stale <Ns>`
+/// header. Not the same as the server's staleness state — `Summary` has no
+/// venue-health field, so this just tracks which venues appear per frame.
 struct VenueTracker {
     last_seen: HashMap<Venue, Instant>,
 }
 
 impl VenueTracker {
-    /// Seeds every tracked venue with the current instant, so the header
-    /// prints a small, honest "stale 0.0s" rather than a special-cased blank
-    /// before the first frame arrives.
+    /// Seeds every venue with the current instant so the header prints
+    /// "stale 0.0s" instead of a blank before the first frame.
     fn new(venues: &[Venue]) -> Self {
         let now = Instant::now();
         Self {
@@ -112,9 +81,8 @@ impl VenueTracker {
         }
     }
 
-    /// Records which of `venues` appear in `summary`'s levels this frame,
-    /// bumping their last-seen instant, and returns that set for the render
-    /// step to use for `●` vs `○`.
+    /// Records which venues appear in this frame's levels, bumps their
+    /// last-seen instant, and returns that set.
     fn update(&mut self, venues: &[Venue], summary: &Summary) -> HashSet<Venue> {
         let now = Instant::now();
         let mut present = HashSet::new();
@@ -141,11 +109,8 @@ async fn main() -> Result<()> {
     let mut stats = Stats::new();
     let mut tracker = VenueTracker::new(&VENUES);
 
-    // Fixed one-second-delay reconnect loop — deliberately simpler than
-    // step 7's feed backoff (exponential + jitter). This one loop covers
-    // both "server not listening yet" (compose's `depends_on` waits for the
-    // container to start, not for the port to accept) and "server died and
-    // came back."
+    // Fixed 1s reconnect loop — simpler than the feed's exponential
+    // backoff, covers both "server not up yet" and "server restarted."
     let reconnect_loop = async {
         loop {
             match connect_and_stream(&cli.addr, colour, &mut stats, &mut tracker).await {
@@ -156,16 +121,8 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Explicit handler, not relying on the OS default SIGINT disposition:
-    // this binary runs as PID 1 in the `client` container (exec-form
-    // `ENTRYPOINT`/`entrypoint:`, no shell in between), and Linux does not
-    // apply a signal's default action to PID 1 unless the process installs
-    // its own handler for it — PID 1 silently ignores an unhandled SIGINT
-    // rather than terminating. `tokio::signal::ctrl_c()` installs one, so
-    // Ctrl-C exits both in a container and when run directly with `cargo
-    // run`. Confirmed the un-fixed binary really did swallow `SIGINT` as
-    // PID 1 (`docker kill --signal SIGINT` on a running container left it
-    // up) before adding this.
+    // Explicit handler needed: as PID 1 in the container, Linux ignores an
+    // unhandled SIGINT rather than terminating the process.
     tokio::select! {
         _ = reconnect_loop => {}
         _ = tokio::signal::ctrl_c() => {
@@ -176,9 +133,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Connects once, streams `Summary` messages until the stream ends or
-/// errors, rendering each one. Returns once the stream is exhausted (the
-/// caller's loop reconnects).
+/// Connects once, streams and renders `Summary` messages until the stream
+/// ends or errors.
 async fn connect_and_stream(
     addr: &str,
     colour: bool,
@@ -200,34 +156,13 @@ async fn connect_and_stream(
     Ok(())
 }
 
-/// Table interior width in visible columns. `row()` pads every row to
-/// exactly this width, which is also what lets the redraw skip a
-/// clear-to-end-of-line: every frame writes the same total width, so
-/// there's nothing left over from a longer previous frame to clear.
-///
-/// Total printed row width is `TABLE_WIDTH + 4` (borders + padding) = 76,
-/// a few columns under the 80-column terminal a `docker compose up`-style
-/// viewer typically assumes — deliberate margin, not 80 exactly, since an
-/// exact-width line's wrap behaviour at the last column is inconsistent
-/// across terminals, and `docker compose`'s own `"servicename | "` log
-/// prefix already eats into the same budget when this isn't viewed with
-/// `--no-log-prefix` (see `compose.yml`'s comment on the `client` service).
+/// Table interior width in visible columns. `row()` pads every row to this
+/// width so a redraw never needs a clear-to-end-of-line. A few columns
+/// under 80 to leave room for `docker compose`'s log prefix.
 const TABLE_WIDTH: usize = 72;
 
-/// Builds one full frame as a boxed table: cursor home once, then borders
-/// and fixed-width rows — never a full-screen clear (`\x1b[2J`), which would
-/// flicker at update rates this fast.
-///
-/// `colour` gates the cursor-home escape and the cell colour codes; the
-/// box-drawing border characters are plain text either way, so a redirected
-/// run still gets a readable framed table, just with no `\x1b[` sequence
-/// anywhere in it — that's what makes "pipe stdout to a file and see clean
-/// text" true.
-///
-/// Takes `venues` as a slice, plus `tracker`/`present` for per-venue status
-/// (`●` for seen this frame, `○ stale <Ns>` otherwise) — step 7 fills in
-/// this field rather than restructuring the header, per the shape step 6
-/// set up for exactly this purpose.
+/// Builds one frame as a boxed table: cursor home, then borders and
+/// fixed-width rows — never a full-screen clear, which would flicker.
 fn render(
     venues: &[Venue],
     tracker: &VenueTracker,
@@ -242,10 +177,8 @@ fn render(
     }
 
     border(&mut out, '┌', '┐');
-    // Padded manually rather than via `format!("{:<56}", ...)`: the status
-    // string can carry ANSI colour codes, and `format!`'s width padding
-    // counts raw bytes, which would misalign the border against a coloured
-    // cell the same way `row()`'s own `visible_len` helper exists to avoid.
+    // Padded manually, not via format!'s width: the status string can
+    // carry ANSI codes, which format! would count as raw bytes.
     let status = venue_status(venues, tracker, present, colour);
     let pad = 56usize.saturating_sub(visible_len(&status));
     row(
@@ -256,11 +189,8 @@ fn render(
     row(&mut out, &format!("{:^35} {:^35}", "BIDS", "ASKS"));
     border(&mut out, '├', '┤');
 
-    // One shared max across *both* sides, not per-side — so a bid bar and
-    // an ask bar of the same visual length really do represent the same
-    // amount, at the cost of a lopsided book making one side's bars all
-    // look small. Depth-bar convention (Binance/Bitstamp's own book UIs),
-    // not this project's invention.
+    // Shared max across both sides so a bid bar and ask bar of the same
+    // length represent the same amount.
     let max_amount = summary
         .bids
         .iter()
@@ -297,10 +227,9 @@ fn border(out: &mut String, left: char, right: char) {
     out.push('\n');
 }
 
-/// Wraps one row of content in the table's side borders, padded to
-/// `TABLE_WIDTH` on *visible* width — `visible_len` skips any ANSI colour
-/// codes already embedded in `content`, so a coloured cell doesn't throw off
-/// border alignment the way naive `str::len` padding would.
+/// Wraps content in the table's side borders, padded to `TABLE_WIDTH` on
+/// visible width (skipping ANSI codes) so a coloured cell doesn't misalign
+/// the border.
 fn row(out: &mut String, content: &str) {
     let pad = TABLE_WIDTH.saturating_sub(visible_len(content));
     out.push_str("│ ");
@@ -309,9 +238,7 @@ fn row(out: &mut String, content: &str) {
     out.push_str(" │\n");
 }
 
-/// Visible character count, skipping `\x1b[...<letter>`-style ANSI escape
-/// sequences — needed so `row`'s padding lines up borders even when
-/// `content` has colour codes embedded in it.
+/// Visible character count, skipping ANSI escape sequences.
 fn visible_len(s: &str) -> usize {
     let mut len = 0;
     let mut chars = s.chars();
@@ -338,31 +265,21 @@ const CELL_WIDTH: usize = 35;
 /// cell — the two get different foreground treatment (`price_fg` vs dim).
 const CELL_FG_SPLIT: usize = 26;
 
-/// 256-colour depth-bar backgrounds, one per side, matching the side's
-/// foreground colour (bid green, ask red) rather than a neutral grey — a
-/// deliberately solid, dark shade of that colour (not a paler "tint") so
-/// the bar reads clearly instead of a translucent-looking highlight.
+/// 256-colour depth-bar backgrounds, matching each side's foreground.
 const BAR_BG_BID: &str = "48;5;22";
 const BAR_BG_ASK: &str = "48;5;52";
 
-/// Which edge of the cell a depth bar grows from. Bids sit in the left
-/// column and asks in the right, so filling bids from the right and asks
-/// from the left makes both bars grow toward the shared border between the
-/// two columns — the spread — instead of both growing left-to-right
-/// regardless of side.
+/// Which edge a depth bar grows from — bids fill from the right, asks from
+/// the left, so both grow toward the shared border between columns.
 #[derive(Clone, Copy)]
 enum FillFrom {
     Left,
     Right,
 }
 
-/// One bid or ask cell: price, amount, venue label, with a depth bar shaded
-/// into the row's background — proportional to `level`'s amount against
-/// `max_amount` (the largest amount across *both* sides currently
-/// displayed, per this project's depth-bar convention: same bar length on
-/// either side means the same size). `None` renders as blank padding of the
-/// same width, so a side with fewer than 10 levels doesn't reflow the
-/// layout.
+/// One bid or ask cell: price, amount, venue label, with a depth bar
+/// proportional to `level`'s amount against `max_amount`. `None` renders
+/// as blank padding so the layout doesn't reflow.
 fn level_cell(
     level: Option<&Level>,
     colour: bool,
@@ -389,13 +306,9 @@ fn level_cell(
     shade_cell(&plain, price_fg, bar_bg, fill_len, fill_from)
 }
 
-/// Wraps `plain` (exactly `CELL_WIDTH` visible chars) in ANSI codes, run by
-/// run, combining two independent boundaries: `CELL_FG_SPLIT` (foreground
-/// colour changes from `price_fg` to dim) and `fill_len` (background turns
-/// from `bar_bg` to the terminal default, on the edge `fill_from` picks).
-/// Each run re-states both its foreground and background explicitly — SGR
-/// state otherwise persists across writes, so leaving either unstated at a
-/// run boundary would bleed the previous run's colour into the next one.
+/// Wraps `plain` in ANSI codes, combining two boundaries: `CELL_FG_SPLIT`
+/// (foreground switches to dim) and `fill_len` (background bar). Each run
+/// restates both fg and bg explicitly, since SGR state persists otherwise.
 fn shade_cell(
     plain: &str,
     price_fg: &str,
@@ -404,8 +317,8 @@ fn shade_cell(
     fill_from: FillFrom,
 ) -> String {
     let fill_len = fill_len.min(CELL_WIDTH);
-    // `Left` shades [0, fill_len); `Right` shades [CELL_WIDTH - fill_len,
-    // CELL_WIDTH) — the same length, anchored to the opposite edge.
+    // Left shades [0, fill_len); Right shades the same length from the
+    // opposite edge.
     let (bar_start, bar_end) = match fill_from {
         FillFrom::Left => (0, fill_len),
         FillFrom::Right => (CELL_WIDTH - fill_len, CELL_WIDTH),
@@ -450,18 +363,12 @@ fn spread_line(summary: &Summary, stats: &Stats, colour: bool) -> String {
         _ => None,
     };
     let bps = match mid {
-        // `mid` can be exactly 0.0 in a hand-built or degenerate book;
-        // guarding here avoids a division by zero showing up as `inf`/`NaN`
-        // in the bps figure, the same class of defect flagged for the
-        // update-rate guard above.
+        // Guard against division by zero producing NaN/inf on screen.
         Some(m) if m != 0.0 => format!("{:.1} bps", summary.spread / m * 10_000.0),
         _ => "n/a".to_string(),
     };
 
-    // Padded to a fixed width *before* colourizing — `colourize` only wraps
-    // the string in escape codes, so padding first keeps this field's
-    // visible width constant regardless of colour, which is what lets
-    // `row()`'s single trailing pad still land the right border in place.
+    // Pad before colourizing so the visible width stays constant either way.
     let spread_field = format!("{:<40}", format!("spread {:>12.8} ({bps})", summary.spread));
     let spread_field = if summary.spread < 0.0 {
         colourize(&spread_field, "\x1b[1;31m", colour)
@@ -469,10 +376,6 @@ fn spread_line(summary: &Summary, stats: &Stats, colour: bool) -> String {
         spread_field
     };
 
-    // `stats.rate` is always finite by construction (`Stats::record` only
-    // ever divides by an elapsed interval already checked > 0.2s), but
-    // guarding the display too costs one line and means a future change to
-    // `Stats` can't silently reintroduce `inf`/`NaN` on screen.
     let rate_text = if stats.rate.is_finite() {
         format!("{:.1}/s", stats.rate)
     } else {
@@ -482,9 +385,7 @@ fn spread_line(summary: &Summary, stats: &Stats, colour: bool) -> String {
     format!("{spread_field}{:>8} updates   {rate_text:<8}", stats.count)
 }
 
-/// Wall-clock `HH:MM:SS`, UTC. Good enough for a demo timestamp — pulling in
-/// a timezone-aware crate for a display-only clock in a tool with no tests
-/// would be a new dependency this step doesn't need.
+/// Wall-clock HH:MM:SS, UTC.
 fn now_hms() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -498,10 +399,8 @@ fn now_hms() -> String {
     )
 }
 
-/// Renders each venue's status cell: `binance ●` (green) if its levels
-/// appeared in the most recent frame, `bitstamp ○ stale 4.2s` (red) if not,
-/// with the duration read from the client's own `tracker` — never from a
-/// server-side signal, since `Summary` carries no venue-health field.
+/// Renders each venue's status: `binance ●` (green) if seen this frame,
+/// `bitstamp ○ stale 4.2s` (red) otherwise.
 fn venue_status(
     venues: &[Venue],
     tracker: &VenueTracker,

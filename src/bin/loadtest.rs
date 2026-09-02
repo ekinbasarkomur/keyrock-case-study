@@ -1,17 +1,9 @@
-//! keyrock-case-study load test — a small tool, not a benchmarking
-//! framework (see `specs/011-measurement/spec.md`'s explicit Out of Scope).
+//! Load test: opens `--clients` gRPC connections against a running
+//! `--addr` server, subscribes each to BookSummary, counts arrivals, and
+//! after `--duration-secs` prints the aggregate receive rate.
 //!
-//! Opens `--clients` independent gRPC connections against an
-//! already-running `--addr` server, subscribes each to `BookSummary`, and
-//! discards every message while counting arrivals. Never starts its own
-//! server — the point is to measure a real, independently-running server
-//! under real production load, not an in-process shortcut. After
-//! `--duration-secs`, prints the aggregate receive rate and exits.
-//!
-//! CPU is deliberately *not* sampled here: this project already runs the
-//! server under Docker, so `docker stats <container>` sampled externally
-//! during a run is the simplest accurate source, with no new dependency and
-//! no self-profiling code in this binary.
+//! CPU isn't sampled here — `docker stats` externally is simpler and needs
+//! no extra dependency.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -48,21 +40,12 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Shared across every client task via `Arc` — each task only ever
-    // increments its own share of the total, so a plain `Ordering::Relaxed`
-    // add is enough (no ordering relationship between clients' counts needs
-    // to be observed, only the final sum after every task is stopped).
+    // Relaxed is enough — only the final sum after all tasks stop matters.
     let total_received = Arc::new(AtomicU64::new(0));
 
-    // Staggering the connects by a few ms each, rather than firing all
-    // `--clients` connection attempts inside the same tokio poll tick,
-    // matters in practice: a genuine instantaneous burst of hundreds of TCP
-    // connects against one address reliably tripped connection resets (seen
-    // live at 500 clients — most connections reset before the stream even
-    // opened) with the server's CPU staying near-idle throughout, which
-    // means it was measuring how the connect path handles a stampede, not
-    // the sustained per-subscriber load Piece 4 is actually after. Real
-    // subscribers also don't all dial in on the same tick.
+    // Stagger connects by a few ms each — firing all at once reliably
+    // tripped connection resets at 500 clients, measuring the connect-path
+    // stampede rather than sustained load.
     let mut tasks: JoinSet<()> = JoinSet::new();
     for client_id in 0..cli.clients {
         let addr = cli.addr.clone();
@@ -82,10 +65,8 @@ async fn main() -> Result<()> {
 
     tokio::time::sleep(Duration::from_secs(cli.duration_secs)).await;
 
-    // Every client task loops forever on its stream (matching the demo
-    // client's own "reconnect forever" shape) — aborting the whole set is
-    // how this binary actually stops, not a cooperative shutdown signal
-    // threaded through every task.
+    // Every client loops forever on its stream, so aborting the set is how
+    // this binary stops.
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
 
@@ -99,9 +80,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Connects one client to `addr`, subscribes to `BookSummary`, and
-/// increments `total_received` for every message that arrives until the
-/// stream ends or this task is aborted by the caller.
+/// Connects one client, subscribes to BookSummary, and increments
+/// `total_received` for every message until the stream ends or aborts.
 async fn subscribe_and_count(addr: &str, total_received: &AtomicU64) -> Result<()> {
     let mut client = OrderbookAggregatorClient::connect(addr.to_string()).await?;
     let mut stream = client.book_summary(Empty {}).await?.into_inner();

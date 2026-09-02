@@ -1,6 +1,5 @@
-//! Integration test for `src/server.rs`'s gRPC surface — real server, real
-//! client, real TCP/HTTP2 connection, no mocking, per the standing
-//! convention recorded in `specs/002-binance-feed/revisions.md` entry 3.
+//! Integration test for the gRPC surface — real server, real client, real
+//! TCP/HTTP2 connection, no mocking.
 
 use std::sync::Arc;
 
@@ -14,10 +13,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::TcpListenerStream;
 
-/// Builds a 20-level `Book` whose bid/ask prices are offset by `price_offset`
-/// from a fixed base — used to hand-build two *distinct* books so the two
-/// published `Summary` values are provably different, not two sends of the
-/// same content.
+/// Builds a 20-level `Book` offset by `price_offset`, so two calls produce
+/// provably distinct books.
 fn book_with_offset(price_offset: f64) -> Book {
     let bids = (0..20)
         .map(|i| {
@@ -44,23 +41,13 @@ fn book_with_offset(price_offset: f64) -> Book {
     }
 }
 
-/// Bug this catches: a server that silently downgraded `BookSummary` from a
-/// real stream to a single-shot response (e.g. an accidental `.take(1)`, or
-/// a future that resolves and drops the connection after the first message)
-/// would still pass a test that only reads one message. Reading exactly two
-/// consecutive messages off the stream is the one thing that actually
-/// exercises the schema's `returns (stream Summary)` contract rather than
-/// just "the RPC call returned something." The content assertions on both
-/// messages (10 bids, 10 asks, positive spread, `exchange == "binance"`)
-/// drive the real `aggregator` -> `summarise` -> `watch` pipeline with two
-/// distinct hand-built `Book`s (real code, no mock), catching a wrong shape,
-/// a crossed/zero spread, or a stale `"fake"` label surviving a forgotten
-/// `run_fake_writer` deletion — not just "did anything arrive."
+/// Catches a server that silently downgrades BookSummary to a single-shot
+/// response. Reads exactly two consecutive messages off the stream,
+/// proving it actually streams, and checks their content is real (10
+/// bids/asks, positive spread, correct exchange label).
 #[tokio::test]
 async fn book_summary_streams_multiple_updates_not_a_single_shot_response() {
-    // Port 0 — never a fixed port. `cargo test` runs tests in the same
-    // binary concurrently, so a fixed port is a flake waiting to happen
-    // against another test in the same run.
+    // Port 0 — tests run concurrently, a fixed port would flake.
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("binding to an OS-assigned port cannot fail");
@@ -68,25 +55,20 @@ async fn book_summary_streams_multiple_updates_not_a_single_shot_response() {
         .local_addr()
         .expect("a bound listener always has a local address");
 
-    // Real pipeline: the aggregator task reads (Venue, Book) pairs off the
-    // same bounded mpsc `main.rs` uses, calls the real `summarise`, and
-    // writes into the same watch channel `src/server.rs` streams from — no
-    // mock of any of those three pieces.
+    // Real pipeline: aggregator, merge, and watch channel — no mocking.
     let (tx, rx) = watch::channel::<Option<Arc<Summary>>>(None);
     let (feed_tx, feed_rx) = mpsc::channel::<(Venue, Book)>(32);
     tokio::spawn(aggregator::run(feed_rx, tx, "ethbtc".to_string()));
 
-    // Send the first book before the client subscribes — `WatchStream`
-    // yields whatever the current value is on first poll, so this is what
-    // the client's first read below observes.
+    // Sent before the client subscribes — WatchStream yields the current
+    // value on first poll, so this is what the first read observes.
     feed_tx
         .send((Venue::Binance, book_with_offset(0.0)))
         .await
         .expect("aggregator's receiver is still alive");
 
-    // Serve on the already-bound listener via `serve_with_incoming`, since
-    // the port was claimed up front to read back its OS-assigned number —
-    // `Router::serve(addr)` would need to rebind the same address itself.
+    // serve_with_incoming reuses the already-bound listener, since the
+    // port was claimed up front to read its OS-assigned number.
     tokio::spawn(async move {
         server::router(rx)
             .serve_with_incoming(TcpListenerStream::new(listener))
@@ -103,21 +85,15 @@ async fn book_summary_streams_multiple_updates_not_a_single_shot_response() {
         .expect("BookSummary call should succeed against a live server")
         .into_inner();
 
-    // Exactly two messages, before any assertion — one only proves the call
-    // returned; two proves it's actually streaming.
+    // Two messages, not one — proves it's actually streaming.
     let first = stream
         .message()
         .await
         .expect("stream should not error")
         .expect("stream should yield a first Summary");
 
-    // The second, distinct book is sent only *after* the first read — a
-    // `watch` channel only carries the latest value, so publishing both
-    // books before the client ever subscribes would collapse them into one
-    // observable value and this second read would hang forever. Sending it
-    // here, after the client has already seen the first value, is what
-    // proves the aggregator publishes a genuine second update rather than
-    // just replaying its startup state.
+    // Sent only after the first read — watch only carries the latest
+    // value, so sending both up front would collapse them into one.
     feed_tx
         .send((Venue::Binance, book_with_offset(1.0)))
         .await
@@ -155,19 +131,10 @@ async fn book_summary_streams_multiple_updates_not_a_single_shot_response() {
     }
 }
 
-/// Bug this catches: a `BookSummary` implementation that moves the shared
-/// `watch::Receiver` into each call instead of cloning it (or that hands
-/// every caller the exact same `Receiver`) — either would work perfectly
-/// against a single client (the only case every other test here exercises)
-/// and break silently the moment a second client subscribes. `watch` over
-/// `broadcast` is this project's fan-out design, and nothing before this
-/// test actually drove it with more than one subscriber.
-///
-/// Connects two independent clients against the same server, confirms both
-/// receive the first published `Summary`, drops one client's stream, and
-/// confirms the survivor still receives a second, later publish — proving
-/// the aggregator's fan-out to the remaining subscriber wasn't broken by the
-/// other one leaving.
+/// Catches a BookSummary impl that moves the shared watch::Receiver
+/// instead of cloning it — would break silently with a second subscriber.
+/// Connects two clients, drops one, confirms the survivor still receives
+/// a later publish.
 #[tokio::test]
 async fn a_second_client_keeps_streaming_after_the_first_one_leaves() {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -210,8 +177,7 @@ async fn a_second_client_keeps_streaming_after_the_first_one_leaves() {
         .expect("BookSummary call should succeed against a live server")
         .into_inner();
 
-    // Both clients must see the value already published before either
-    // subscribed — `WatchStream` yields the current value on first poll.
+    // Both must see the value published before either subscribed.
     stream_a
         .message()
         .await
@@ -223,15 +189,11 @@ async fn a_second_client_keeps_streaming_after_the_first_one_leaves() {
         .expect("stream should not error")
         .expect("client B should receive the first Summary");
 
-    // Client A leaves — drop its stream (and the underlying gRPC
-    // connection). Client B must be unaffected.
+    // Client A leaves. Client B must be unaffected.
     drop(stream_a);
     drop(client_a);
 
-    // Give the server a moment to notice the dropped connection before
-    // publishing the next update, so a broken fan-out (one that somehow ties
-    // the survivor's delivery to the leaver) has a real chance to show up
-    // rather than racing past it.
+    // Give the server a moment to notice before publishing the next update.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     feed_tx
