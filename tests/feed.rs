@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use keyrock_case_study::exchange::{Exchange, Venue};
-use keyrock_case_study::feed::run_feed;
-use keyrock_case_study::model::Book;
+use rust_crypto_orderbook::exchange::{Exchange, Venue};
+use rust_crypto_orderbook::feed::run_feed;
+use rust_crypto_orderbook::model::Book;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 

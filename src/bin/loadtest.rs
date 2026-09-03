@@ -1,4 +1,4 @@
-//! keyrock-case-study load test — a small tool, not a benchmarking
+//! rust-crypto-orderbook load test — a small tool, not a benchmarking
 //! framework (see `specs/011-measurement/spec.md`'s explicit Out of Scope).
 //!
 //! Opens `--clients` independent gRPC connections against an
@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use keyrock_case_study::orderbook::Empty;
-use keyrock_case_study::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
+use rust_crypto_orderbook::orderbook::Empty;
+use rust_crypto_orderbook::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
 
@@ -28,7 +28,7 @@ use tokio_stream::StreamExt;
 #[command(
     name = "loadtest",
     version,
-    about = "keyrock-case-study load test — opens N gRPC subscribers against a running server"
+    about = "rust-crypto-orderbook load test — opens N gRPC subscribers against a running server"
 )]
 struct Cli {
     /// gRPC server address, e.g. http://127.0.0.1:50051.

@@ -642,32 +642,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "keyrock-case-study"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crc32fast",
- "futures-util",
- "hdrhistogram",
- "prost",
- "rand",
- "rustls",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
- "tonic-reflection",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1033,6 +1007,32 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rust-crypto-orderbook"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crc32fast",
+ "futures-util",
+ "hdrhistogram",
+ "prost",
+ "rand",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tonic-reflection",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

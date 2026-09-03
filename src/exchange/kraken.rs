@@ -415,7 +415,7 @@ impl Kraken {
     }
 }
 
-/// Known quote-currency suffixes this project's `--pair`/`KEYROCK_PAIR`
+/// Known quote-currency suffixes this project's `--pair`/`ORDERBOOK_PAIR`
 /// values assume are the only ones in play — same assumption Binance's and
 /// Bitstamp's lowercase-concatenated pair token already relies on implicitly
 /// (neither splits it at all). Longest-suffix-first so e.g. a hypothetical

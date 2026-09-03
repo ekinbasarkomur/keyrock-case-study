@@ -1,9 +1,8 @@
-# keyrock-case-study
+# rust-crypto-orderbook
 
-A take-home case study for a Rust engineer role at Keyrock. It connects to
-Binance, Bitstamp, and Kraken order-book feeds, merges them into one book,
-and streams the spread plus the top 10 bids/asks over gRPC
-(`proto/orderbook.proto`).
+A Rust order book aggregator. It connects to Binance, Bitstamp, and Kraken
+order-book feeds, merges them into one book, and streams the spread plus
+the top 10 bids/asks over gRPC (`proto/orderbook.proto`).
 
 Steps 0-9 of 11 are done. All three feeds carry real market data. One
 aggregator task merges them and publishes on a `watch` channel; the gRPC
@@ -42,8 +41,8 @@ venue really is — see [Kraken](#kraken) for what that cost.
 ```sh
 docker compose up --build
 docker compose run --rm client
-cargo run --bin keyrock-case-study
-cargo run --bin keyrock-case-study -- --pair btcusd --port 12345
+cargo run --bin rust-crypto-orderbook
+cargo run --bin rust-crypto-orderbook -- --pair btcusd --port 12345
 ```
 
 Three binaries now, so `--bin` picks one: the server, `client`, and
@@ -265,16 +264,16 @@ that's why it stays thin.
 
 ## Configuration
 
-Every setting is a CLI flag or a `KEYROCK_`-prefixed env var, both with
+Every setting is a CLI flag or a `ORDERBOOK_`-prefixed env var, both with
 defaults. A flag wins over its env var. Copy `.env.example` to `.env` to
 set them without exporting by hand.
 
 | Setting | Flag | Env var | Default |
 | --- | --- | --- | --- |
-| Pair | `--pair` | `KEYROCK_PAIR` | `ethbtc` |
-| Port | `--port` | `KEYROCK_PORT` | `50051` |
-| Log level | — | `KEYROCK_LOG_LEVEL` | `info` (`RUST_LOG` wins if set) |
-| Host | — | `KEYROCK_HOST` | `127.0.0.1` (use `0.0.0.0` in a container) |
+| Pair | `--pair` | `ORDERBOOK_PAIR` | `ethbtc` |
+| Port | `--port` | `ORDERBOOK_PORT` | `50051` |
+| Log level | — | `ORDERBOOK_LOG_LEVEL` | `info` (`RUST_LOG` wins if set) |
+| Host | — | `ORDERBOOK_HOST` | `127.0.0.1` (use `0.0.0.0` in a container) |
 
 If `HTTPS_PROXY`/`HTTP_PROXY` is set, both feeds tunnel through it.
 
