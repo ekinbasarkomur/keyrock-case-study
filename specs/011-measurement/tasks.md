@@ -223,7 +223,7 @@ and flag it rather than treating it as a natural extension.
   - **Before**: at the Phase 2 tip (before this task's `Cargo.toml` edit),
     time `cargo build --release` (e.g. `time cargo build --release`) and
     record the wall time. Run the release binary
-    (`./target/release/keyrock-case-study --pair ethbtc --port 50051`)
+    (`./target/release/rust-crypto-orderbook --pair ethbtc --port 50051`)
     against real or proxied connectivity for a fixed 5-minute window with
     `RUST_LOG=info`, and record the total-span p50 from the last periodic
     log line printed inside that window.

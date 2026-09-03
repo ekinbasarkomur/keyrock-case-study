@@ -280,10 +280,10 @@ this phase):**
 **Files:** `src/main.rs`
 
 **Change:**
-- `use keyrock_case_study::aggregator;`, `use keyrock_case_study::merge;` (if
+- `use rust_crypto_orderbook::aggregator;`, `use rust_crypto_orderbook::merge;` (if
   referenced directly here — likely not, since `aggregator::run` wraps the
   `summarise` call; add only what's actually referenced), `use
-  keyrock_case_study::exchange::Venue;`, `use tokio::sync::mpsc;`, `use
+  rust_crypto_orderbook::exchange::Venue;`, `use tokio::sync::mpsc;`, `use
   std::sync::Arc;` added to imports as needed.
 - `let (tx, rx) = watch::channel(None);` — type now infers as
   `Option<Arc<Summary>>` because of `server::router`'s new signature; no
@@ -372,10 +372,10 @@ buildable and tested.
   function no longer exists after phase 3).
 - Construct the mpsc channel from phase 3:
   `let (feed_tx, feed_rx) = tokio::sync::mpsc::channel::<(Venue, Book)>(32);`
-  (import `keyrock_case_study::exchange::Venue` and
-  `keyrock_case_study::model::Book`).
+  (import `rust_crypto_orderbook::exchange::Venue` and
+  `rust_crypto_orderbook::model::Book`).
 - Spawn the real aggregator task on it:
-  `tokio::spawn(keyrock_case_study::aggregator::run(feed_rx, tx));` — real
+  `tokio::spawn(rust_crypto_orderbook::aggregator::run(feed_rx, tx));` — real
   code path, not a mock: `aggregator` → `summarise` → `watch`.
 - Send **two distinct hand-built `Book` values** down `feed_tx` (e.g. two
   20-level books with different prices, so the two published `Summary`
