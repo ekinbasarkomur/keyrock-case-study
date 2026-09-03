@@ -1,7 +1,6 @@
-# keyrock-case-study
+# rust-crypto-orderbook
 
-A take-home case study for a Rust engineer application at Keyrock. The
-finished service connects to Binance and Bitstamp order-book websocket
+A Rust order book aggregator. The finished service connects to Binance and Bitstamp order-book websocket
 feeds, merges the two books for one traded pair, and streams the spread plus
 the top 10 bids/asks over gRPC (`proto/orderbook.proto`).
 
@@ -126,18 +125,18 @@ crate, so logic in `main.rs` wouldn't be reachable from it.
 
 ## Configuration
 
-Every setting works from a CLI flag or a `KEYROCK_`-prefixed env var, both
+Every setting works from a CLI flag or a `ORDERBOOK_`-prefixed env var, both
 with defaults. Copy `.env.example` to `.env` to set them without exporting
 by hand.
 
 | Setting | Flag | Env var | Default |
 | --- | --- | --- | --- |
-| Pair | `--pair` | `KEYROCK_PAIR` | `ethbtc` |
-| Port | `--port` | `KEYROCK_PORT` | `50051` |
-| Log level | — | `KEYROCK_LOG_LEVEL` | `info` (`RUST_LOG` wins if set) |
-| Host | — | `KEYROCK_HOST` | `127.0.0.1` (use `0.0.0.0` in a container) |
+| Pair | `--pair` | `ORDERBOOK_PAIR` | `ethbtc` |
+| Port | `--port` | `ORDERBOOK_PORT` | `50051` |
+| Log level | — | `ORDERBOOK_LOG_LEVEL` | `info` (`RUST_LOG` wins if set) |
+| Host | — | `ORDERBOOK_HOST` | `127.0.0.1` (use `0.0.0.0` in a container) |
 
-A CLI flag overrides its matching env var. An unparseable `KEYROCK_PORT` is a
+A CLI flag overrides its matching env var. An unparseable `ORDERBOOK_PORT` is a
 startup error.
 
 If `HTTPS_PROXY`/`HTTP_PROXY` is set, both feeds tunnel through it via an
