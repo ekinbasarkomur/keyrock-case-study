@@ -13,7 +13,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-const BIN: &str = env!("CARGO_BIN_EXE_keyrock-case-study");
+const BIN: &str = env!("CARGO_BIN_EXE_rust-crypto-orderbook");
 
 // As of Phase 3 of specs/002-binance-feed, `main` connects to Binance and
 // loops forever reading the websocket — there is no bounded-run mode. That
@@ -114,7 +114,7 @@ fn flags_override_defaults_with_no_env_vars() {
 #[test]
 fn env_vars_override_defaults_with_no_flags() {
     let (mut child, captured) = spawn_and_capture_stderr_until(
-        &[("KEYROCK_PAIR", "btcusd"), ("KEYROCK_PORT", "12345")],
+        &[("ORDERBOOK_PAIR", "btcusd"), ("ORDERBOOK_PORT", "12345")],
         &[],
         "port=12345",
         Duration::from_secs(5),
@@ -128,10 +128,10 @@ fn env_vars_override_defaults_with_no_flags() {
 
 #[test]
 fn cli_flag_wins_over_env_var_for_port() {
-    // The actual precedence regression test: KEYROCK_PORT and --port both
+    // The actual precedence regression test: ORDERBOOK_PORT and --port both
     // set, to different values — the flag must win.
     let (mut child, captured) = spawn_and_capture_stderr_until(
-        &[("KEYROCK_PORT", "1")],
+        &[("ORDERBOOK_PORT", "1")],
         &["--port", "12345"],
         "port=12345",
         Duration::from_secs(5),
@@ -156,11 +156,11 @@ fn invalid_port_flag_is_rejected_by_clap() {
 #[test]
 fn invalid_port_env_var_fails_loudly_rather_than_defaulting() {
     let out = Command::new(BIN)
-        .env("KEYROCK_PORT", "not-a-number")
+        .env("ORDERBOOK_PORT", "not-a-number")
         .output()
         .expect("failed to run binary");
 
     assert!(!out.status.success(), "expected a non-zero exit");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("KEYROCK_PORT"), "stderr was: {stderr}");
+    assert!(stderr.contains("ORDERBOOK_PORT"), "stderr was: {stderr}");
 }

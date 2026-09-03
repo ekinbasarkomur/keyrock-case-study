@@ -1,4 +1,4 @@
-# keyrock-case-study as a container:
+# rust-crypto-orderbook as a container:
 #
 #     docker compose up --build
 #     docker compose run --rm app --pair btcusd --port 12345
@@ -12,20 +12,20 @@
 services:
   app:
     build: .
-    image: keyrock-case-study:local
-    container_name: keyrock-case-study # stable handle for host `docker` commands
+    image: rust-crypto-orderbook:local
+    container_name: rust-crypto-orderbook # stable handle for host `docker` commands
 
     env_file:
       - path: .env
         required: false
 
     environment:
-      KEYROCK_LOG_LEVEL: ${KEYROCK_LOG_LEVEL:-info}
+      ORDERBOOK_LOG_LEVEL: ${ORDERBOOK_LOG_LEVEL:-info}
       # 127.0.0.1 inside the container is the container's own loopback, not
       # the host's — binding there would make the published port below
       # refuse every connection while the container's own logs look
       # perfectly healthy. See Config::host's doc comment (src/config.rs).
-      KEYROCK_HOST: 0.0.0.0
+      ORDERBOOK_HOST: 0.0.0.0
       # Binance isn't reachable directly from some networks. If PROXY_HOST/
       # PROXY_PORT are set in .env, the app tunnels its Binance connection
       # through an HTTP CONNECT proxy at that address. `:+` is compose's
