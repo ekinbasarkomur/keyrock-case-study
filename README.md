@@ -1,34 +1,17 @@
-# keyrock-case-study
+# rust-crypto-orderbook
 
-A take-home case study for a Rust engineer role at Keyrock. It connects to
-Binance, Bitstamp, and Kraken order-book feeds, merges them into one book,
-and streams the spread plus the top 10 bids/asks over gRPC
-(`proto/orderbook.proto`).
+A Rust service that connects to Binance, Bitstamp, and Kraken order-book
+feeds, merges them into one book, and streams the spread plus the top 10
+bids/asks over gRPC (`proto/orderbook.proto`).
 
-Steps 0-9 of 11 are done. All three feeds carry real market data. One
-aggregator task merges them and publishes on a `watch` channel; the gRPC
-server streams that to clients on every change. A feed reconnects on its
-own. A stale venue drops out of the merge. A pair that never produces data
-exits after 60s. A terminal client shows the live book. Real latency and
-throughput numbers are in [Measurement](#measurement). Kraken was added
-after the brief's two required venues, as a check on how cheap a third
-venue really is — see [Kraken](#kraken) for what that cost.
-
-## Build order
-
-| Step | What | Status |
-| --- | --- | --- |
-| 0 | Scaffold: deps, proto, build.rs, CLI, config, Docker | Done |
-| 1 | Binance feed | Done |
-| 2 | gRPC server, fake data | Done |
-| 3 | Real data end to end | Done |
-| 4 | Bitstamp feed | Done |
-| 5 | Real merge, top 10, spread | Done |
-| 6 | Demo client | Done |
-| 7 | Reconnection, staleness | Done |
-| 8 | Composition/wiring tests | Done |
-| 9 | Latency measurement | Done |
-| 10 | Final cleanup | Not started |
+All three feeds carry real market data. One aggregator task merges them and
+publishes on a `watch` channel; the gRPC server streams that to clients on
+every change. A feed reconnects on its own. A stale venue drops out of the
+merge. A pair that never produces data exits after 60s. A terminal client
+shows the live book. Real latency and throughput numbers are in
+[Measurement](#measurement). Kraken was added after the two required
+venues (Binance, Bitstamp), as a check on how cheap a third one is — see
+[Kraken](#kraken) for what that cost.
 
 ## Requirements
 
@@ -42,8 +25,8 @@ venue really is — see [Kraken](#kraken) for what that cost.
 ```sh
 docker compose up --build
 docker compose run --rm client
-cargo run --bin keyrock-case-study
-cargo run --bin keyrock-case-study -- --pair btcusd --port 12345
+cargo run --bin rust-crypto-orderbook
+cargo run --bin rust-crypto-orderbook -- --pair btcusd --port 12345
 ```
 
 Three binaries now, so `--bin` picks one: the server, `client`, and
@@ -114,8 +97,8 @@ after 60s, the process exits and names the pair.
 
 ## Kraken
 
-Added after the brief's two required venues, to find out what a third one
-actually costs given the architecture was supposedly built for it. Two of
+Added after Binance and Bitstamp, to find out what a third venue actually
+costs given the architecture was supposedly built for it. Two of
 `src/exchange/mod.rs`, `src/feed.rs`, `src/main.rs` picked up small,
 mechanical additions (a `Venue::Kraken` arm, a scoped ping branch, a third
 spawn); `src/exchange/kraken.rs` did not turn out to be mechanical.
@@ -269,16 +252,16 @@ that's why it stays thin.
 
 ## Configuration
 
-Every setting is a CLI flag or a `KEYROCK_`-prefixed env var, both with
+Every setting is a CLI flag or a `ORDERBOOK_`-prefixed env var, both with
 defaults. A flag wins over its env var. Copy `.env.example` to `.env` to
 set them without exporting by hand.
 
 | Setting | Flag | Env var | Default |
 | --- | --- | --- | --- |
-| Pair | `--pair` | `KEYROCK_PAIR` | `ethbtc` |
-| Port | `--port` | `KEYROCK_PORT` | `50051` |
-| Log level | — | `KEYROCK_LOG_LEVEL` | `info` (`RUST_LOG` wins if set) |
-| Host | — | `KEYROCK_HOST` | `127.0.0.1` (use `0.0.0.0` in a container) |
+| Pair | `--pair` | `ORDERBOOK_PAIR` | `ethbtc` |
+| Port | `--port` | `ORDERBOOK_PORT` | `50051` |
+| Log level | — | `ORDERBOOK_LOG_LEVEL` | `info` (`RUST_LOG` wins if set) |
+| Host | — | `ORDERBOOK_HOST` | `127.0.0.1` (use `0.0.0.0` in a container) |
 
 If `HTTPS_PROXY`/`HTTP_PROXY` is set, both feeds tunnel through it.
 

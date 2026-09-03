@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use keyrock_case_study::orderbook::Empty;
-use keyrock_case_study::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
+use rust_crypto_orderbook::orderbook::Empty;
+use rust_crypto_orderbook::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
 
@@ -20,7 +20,7 @@ use tokio_stream::StreamExt;
 #[command(
     name = "loadtest",
     version,
-    about = "keyrock-case-study load test — opens N gRPC subscribers against a running server"
+    about = "rust-crypto-orderbook load test — opens N gRPC subscribers against a running server"
 )]
 struct Cli {
     /// gRPC server address, e.g. http://127.0.0.1:50051.

@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
-use keyrock_case_study::exchange::Venue;
-use keyrock_case_study::model::{Amount, Book, Price};
-use keyrock_case_study::orderbook::Empty;
-use keyrock_case_study::orderbook::Summary;
-use keyrock_case_study::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
-use keyrock_case_study::{aggregator, server};
+use rust_crypto_orderbook::exchange::Venue;
+use rust_crypto_orderbook::model::{Amount, Book, Price};
+use rust_crypto_orderbook::orderbook::Empty;
+use rust_crypto_orderbook::orderbook::Summary;
+use rust_crypto_orderbook::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
+use rust_crypto_orderbook::{aggregator, server};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::TcpListenerStream;

@@ -1,17 +1,17 @@
 //! Configuration, read from the environment.
 //!
-//! One prefix (`KEYROCK_`), one accessor, no global mutable state. Every
+//! One prefix (`ORDERBOOK_`), one accessor, no global mutable state. Every
 //! setting has a default so the binary runs with an empty environment — a
 //! config error at startup should be impossible, not merely unlikely.
 
 use std::env;
 
 /// Environment-variable prefix for every setting this crate reads.
-pub const ENV_PREFIX: &str = "KEYROCK_";
+pub const ENV_PREFIX: &str = "ORDERBOOK_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// `RUST_LOG`-style filter, e.g. "info" or "keyrock_case_study=debug".
+    /// `RUST_LOG`-style filter, e.g. "info" or "rust_crypto_orderbook=debug".
     pub log_level: String,
     /// Address the service binds to. Must be 0.0.0.0 inside a container —
     /// 127.0.0.1 there refuses every outside connection.
@@ -76,9 +76,9 @@ mod tests {
     #[test]
     fn invalid_port_is_an_error_not_a_fallback() {
         // Mutates the environment — the only env-mutating test in this binary.
-        unsafe { env::set_var("KEYROCK_PORT", "not-a-number") };
+        unsafe { env::set_var("ORDERBOOK_PORT", "not-a-number") };
         let err = Config::from_env().unwrap_err();
-        unsafe { env::remove_var("KEYROCK_PORT") };
+        unsafe { env::remove_var("ORDERBOOK_PORT") };
         assert!(matches!(err, ConfigError::InvalidPort(_)));
     }
 }

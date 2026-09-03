@@ -1,4 +1,4 @@
-//! keyrock-case-study client — a terminal viewer for the gRPC stream.
+//! rust-crypto-orderbook client — a terminal viewer for the gRPC stream.
 //!
 //! Connects to `src/server.rs` and redraws the combined book in place, like
 //! `top`. Not part of the service — just lets a reviewer see the merged
@@ -10,10 +10,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use clap::Parser;
-use keyrock_case_study::exchange::Venue;
-use keyrock_case_study::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
-use keyrock_case_study::orderbook::{Empty, Level, Summary};
-use keyrock_case_study::telemetry;
+use rust_crypto_orderbook::exchange::Venue;
+use rust_crypto_orderbook::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
+use rust_crypto_orderbook::orderbook::{Empty, Level, Summary};
+use rust_crypto_orderbook::telemetry;
 use tokio::time::sleep;
 use tokio_stream::StreamExt;
 use tracing::{info, warn};
@@ -26,7 +26,7 @@ const ROWS: usize = 10;
 const VENUES: [Venue; 3] = [Venue::Binance, Venue::Bitstamp, Venue::Kraken];
 
 #[derive(Parser)]
-#[command(name = "client", version, about = "keyrock-case-study demo client")]
+#[command(name = "client", version, about = "rust-crypto-orderbook demo client")]
 struct Cli {
     /// gRPC server address, e.g. http://127.0.0.1:50051.
     #[arg(long, default_value = "http://127.0.0.1:50051")]

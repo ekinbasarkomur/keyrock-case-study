@@ -123,11 +123,11 @@ Verified by reading the files directly:
   — it does not emit a file descriptor set, which reflection needs.
 - `Config` (`src/config.rs`) already has `host` (default `127.0.0.1`, doc
   comment already states it must be `0.0.0.0` in a container) and `port`
-  (default `50051`), both read from `KEYROCK_HOST`/`KEYROCK_PORT` — no
+  (default `50051`), both read from `ORDERBOOK_HOST`/`ORDERBOOK_PORT` — no
   config changes needed for this step, only actually acting on `host`/`port`
   by binding a listener to them.
 - `compose.yml` has no `ports:` section and a comment stating "When a server
-  lands: publish on loopback only and set KEYROCK_HOST=0.0.0.0" — this step
+  lands: publish on loopback only and set ORDERBOOK_HOST=0.0.0.0" — this step
   is that moment.
 - `Dockerfile`'s `CMD []` runs the binary with no arguments; there is a
   commented-out `HEALTHCHECK` block explicitly deferred until a server
@@ -282,7 +282,7 @@ take-home reviewer's convenience, not for a production posture.
 
 ### Docker — three changes, landing together
 
-- `compose.yml` sets `KEYROCK_HOST=0.0.0.0` inside the container. Without
+- `compose.yml` sets `ORDERBOOK_HOST=0.0.0.0` inside the container. Without
   this, the server binds the container's own loopback interface, and the
   published port refuses every connection while the container's own logs
   look completely healthy — `Config`'s existing doc comment on `host`
@@ -452,7 +452,7 @@ Required real verification:
   that produces the wrong shape or a crossed/zero spread by accident, not
   just "did anything arrive."
 - Manual `docker compose up` + `grpcurl` from the host — proves the
-  `KEYROCK_HOST=0.0.0.0` / published-port / stays-up trio actually works
+  `ORDERBOOK_HOST=0.0.0.0` / published-port / stays-up trio actually works
   together end to end; this is exactly the kind of three-piece
   interaction that unit or integration tests inside the crate cannot
   observe (it's a container networking property, not a Rust-level one).

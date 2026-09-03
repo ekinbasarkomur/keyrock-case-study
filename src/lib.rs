@@ -1,4 +1,4 @@
-//! keyrock-case-study — library crate.
+//! rust-crypto-orderbook — library crate.
 //!
 //! Everything testable lives here. `src/main.rs` is a thin shell that parses
 //! arguments and calls into this crate — logic in main.rs isn't reachable
