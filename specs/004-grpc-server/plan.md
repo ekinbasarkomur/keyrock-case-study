@@ -193,14 +193,14 @@ environment (Docker daemon availability, real Binance reachability).
 
 ### Phase 5: Docker + compose.yml
 
-- Objective: Make the container reachable from the host — `KEYROCK_HOST`
+- Objective: Make the container reachable from the host — `ORDERBOOK_HOST`
   bound to all interfaces inside the container, the port published on
   loopback only, and the "logs one line and exits 0" description corrected
   to "stays running" — landing after the server actually exists and works,
   so this phase's own verification (`grpcurl` reaching the container) has
   something real to hit rather than testing plumbing around an empty
   server.
-- Main changes: `compose.yml` — set `KEYROCK_HOST=0.0.0.0` inside the
+- Main changes: `compose.yml` — set `ORDERBOOK_HOST=0.0.0.0` inside the
   container's environment; add `127.0.0.1:50051:50051` under `ports:`
   (host-loopback only, never `0.0.0.0:50051:50051`); correct the header
   comment describing "defaults, logs, exits 0" to describe the new

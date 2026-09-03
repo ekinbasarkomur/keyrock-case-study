@@ -61,7 +61,7 @@ packet. No other path.
 `src/bin/client.rs`. It needs the generated client:
 
 ```rust
-use keyrock_case_study::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
+use rust_crypto_orderbook::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
 ```
 
 reachable because `lib.rs` already re-exports the generated `orderbook`
@@ -160,7 +160,7 @@ one more thing to keep in sync with no benefit.
 ### Docker
 
 One `COPY` line for the second binary in the existing builder/runtime
-split. `ENTRYPOINT` stays `["keyrock-case-study"]` — `docker compose run
+split. `ENTRYPOINT` stays `["rust-crypto-orderbook"]` — `docker compose run
 --rm app --pair btcusd` relies on args passing through to the server, so it
 must not change.
 
@@ -169,7 +169,7 @@ level:
 
 ```yaml
 client:
-  image: keyrock-case-study:local
+  image: rust-crypto-orderbook:local
   entrypoint: ["client"]
   command: ["--addr", "http://app:50051"]
   depends_on: [app]
