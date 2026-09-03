@@ -1,4 +1,4 @@
-# keyrock-case-study as a container.
+# rust-crypto-orderbook as a container.
 #
 # Two stages: a full Rust toolchain builds the binary, and a slim Debian image
 # runs it. The toolchain is ~1.5 GB and has no business shipping — the runtime
@@ -45,7 +45,7 @@ COPY src/ ./src/
 # This failure is silent — the image builds, runs, and does nothing.
 RUN touch src/main.rs src/lib.rs \
     && cargo build --release \
-    && strip target/release/keyrock-case-study
+    && strip target/release/rust-crypto-orderbook
 
 # --- runtime ----------------------------------------------------------------
 FROM debian:bookworm-slim
@@ -58,7 +58,7 @@ FROM debian:bookworm-slim
 RUN useradd --create-home --uid 10001 app
 
 WORKDIR /app
-COPY --from=builder /build/target/release/keyrock-case-study /usr/local/bin/keyrock-case-study
+COPY --from=builder /build/target/release/rust-crypto-orderbook /usr/local/bin/rust-crypto-orderbook
 
 USER app
 
@@ -73,5 +73,5 @@ USER app
 #
 # (that needs `curl` added to the apt line above — the slim image has none).
 
-ENTRYPOINT ["keyrock-case-study"]
+ENTRYPOINT ["rust-crypto-orderbook"]
 CMD []

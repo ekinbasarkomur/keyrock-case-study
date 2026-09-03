@@ -10,7 +10,7 @@
 
 use std::process::Command;
 
-const BIN: &str = env!("CARGO_BIN_EXE_keyrock-case-study");
+const BIN: &str = env!("CARGO_BIN_EXE_rust-crypto-orderbook");
 
 #[test]
 fn default_run_logs_defaults_with_empty_stdout() {
@@ -43,8 +43,8 @@ fn flags_override_defaults_with_no_env_vars() {
 #[test]
 fn env_vars_override_defaults_with_no_flags() {
     let out = Command::new(BIN)
-        .env("KEYROCK_PAIR", "btcusd")
-        .env("KEYROCK_PORT", "12345")
+        .env("ORDERBOOK_PAIR", "btcusd")
+        .env("ORDERBOOK_PORT", "12345")
         .output()
         .expect("failed to run binary");
 
@@ -56,10 +56,10 @@ fn env_vars_override_defaults_with_no_flags() {
 
 #[test]
 fn cli_flag_wins_over_env_var_for_port() {
-    // The actual precedence regression test: KEYROCK_PORT and --port both
+    // The actual precedence regression test: ORDERBOOK_PORT and --port both
     // set, to different values — the flag must win.
     let out = Command::new(BIN)
-        .env("KEYROCK_PORT", "1")
+        .env("ORDERBOOK_PORT", "1")
         .args(["--port", "12345"])
         .output()
         .expect("failed to run binary");
@@ -83,11 +83,11 @@ fn invalid_port_flag_is_rejected_by_clap() {
 #[test]
 fn invalid_port_env_var_fails_loudly_rather_than_defaulting() {
     let out = Command::new(BIN)
-        .env("KEYROCK_PORT", "not-a-number")
+        .env("ORDERBOOK_PORT", "not-a-number")
         .output()
         .expect("failed to run binary");
 
     assert!(!out.status.success(), "expected a non-zero exit");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("KEYROCK_PORT"), "stderr was: {stderr}");
+    assert!(stderr.contains("ORDERBOOK_PORT"), "stderr was: {stderr}");
 }

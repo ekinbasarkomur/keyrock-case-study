@@ -47,13 +47,13 @@ only sequences landing them.
 - Objective: Replace the `hello`/`doctor` scaffold with the `--pair`/`--port`
   entry point and the env-var/CLI precedence rule, with full test coverage
   for the new contract.
-- Main changes: `src/config.rs` (`pair` field, `KEYROCK_PAIR`, default port
+- Main changes: `src/config.rs` (`pair` field, `ORDERBOOK_PAIR`, default port
   `50051`), `src/main.rs` (flat `Cli` struct, `Option<T>` flags, merge over
   `Config::from_env()`, single `info!` startup line), `src/lib.rs`
   (`greeting()`, its test, and `VERSION` removed), `tests/cli.rs` (replace
   the 4 subcommand-era tests with the 6 cases spec.md's Testing Strategy
   lists: default run, flags-only, env-only, flag-overrides-env precedence,
-  invalid `--port`, invalid `KEYROCK_PORT`).
+  invalid `--port`, invalid `ORDERBOOK_PORT`).
 - Verification:
   - `cargo test` green against the new test set (exact count per spec.md,
     but zero tests still asserting `hello`/`doctor` behavior).
@@ -80,7 +80,7 @@ only sequences landing them.
   Cargo.lock ./` and `COPY proto/ ./proto/` before the stub build; drop the
   `ca-certificates` apt install; `CMD` changes from `["--help"]` to `[]`),
   `compose.yml` (header comment update only — no behavioral change),
-  `.env.example` (`KEYROCK_PAIR=ethbtc` line added, `KEYROCK_PORT` default
+  `.env.example` (`ORDERBOOK_PAIR=ethbtc` line added, `ORDERBOOK_PORT` default
   shown as `50051`).
 - Verification:
   - `docker compose build` succeeds.
@@ -106,7 +106,7 @@ only sequences landing them.
   surface, and layout, so it's accurate at the point this step is
   considered done.
 - Main changes: `README.md` only — quick start commands, configuration
-  table (`KEYROCK_PAIR` row added, `KEYROCK_PORT` default corrected,
+  table (`ORDERBOOK_PAIR` row added, `ORDERBOOK_PORT` default corrected,
   precedence rule stated), `proto/orderbook.proto` mention under Layout,
   placeholder "What would change for production" heading.
 - Verification: manually run every command shown in the updated "Quick

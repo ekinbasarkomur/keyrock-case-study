@@ -1,7 +1,6 @@
-# keyrock-case-study
+# rust-crypto-orderbook
 
-A take-home case study for a Rust engineer application at Keyrock. The
-finished service connects to Binance and Bitstamp order-book websocket
+A Rust order book aggregator. The finished service connects to Binance and Bitstamp order-book websocket
 feeds, merges the two books for one traded pair, and streams the spread plus
 the top 10 bids/asks over gRPC (`proto/orderbook.proto`).
 
@@ -64,16 +63,16 @@ reachable from them.
 
 ## Configuration
 
-Every setting can be given two ways: a CLI flag or a `KEYROCK_`-prefixed
+Every setting can be given two ways: a CLI flag or a `ORDERBOOK_`-prefixed
 environment variable. Both have working defaults, so the binary runs with no
 flags and no environment at all.
 
 | Setting | Flag | Env var | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| Pair | `--pair` | `KEYROCK_PAIR` | `ethbtc` | Traded pair the aggregator will stream once feed/merge logic lands. |
-| Port | `--port` | `KEYROCK_PORT` | `50051` | Port the service will bind to once the gRPC server exists. An unparseable `KEYROCK_PORT` is a startup error, not a silent fallback. |
-| Log level | — | `KEYROCK_LOG_LEVEL` | `info` | `RUST_LOG`-style filter. An explicit `RUST_LOG` in the environment wins over this. |
-| Host | — | `KEYROCK_HOST` | `127.0.0.1` | Bind address for the eventual server. Use `0.0.0.0` inside a container. |
+| Pair | `--pair` | `ORDERBOOK_PAIR` | `ethbtc` | Traded pair the aggregator will stream once feed/merge logic lands. |
+| Port | `--port` | `ORDERBOOK_PORT` | `50051` | Port the service will bind to once the gRPC server exists. An unparseable `ORDERBOOK_PORT` is a startup error, not a silent fallback. |
+| Log level | — | `ORDERBOOK_LOG_LEVEL` | `info` | `RUST_LOG`-style filter. An explicit `RUST_LOG` in the environment wins over this. |
+| Host | — | `ORDERBOOK_HOST` | `127.0.0.1` | Bind address for the eventual server. Use `0.0.0.0` inside a container. |
 
 **Precedence: a CLI flag overrides its matching environment variable when
 both are given.** `--pair`/`--port` are the more specific, closer-to-the-call-site

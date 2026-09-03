@@ -1,4 +1,4 @@
-//! keyrock-case-study — CLI entry point.
+//! rust-crypto-orderbook — CLI entry point.
 //!
 //! Deliberately thin: parse arguments, initialise logging, delegate. Anything
 //! worth testing belongs in the library crate (`src/lib.rs`), which the
@@ -6,17 +6,17 @@
 
 use anyhow::Result;
 use clap::Parser;
-use keyrock_case_study::{config::Config, telemetry};
+use rust_crypto_orderbook::{config::Config, telemetry};
 use tracing::info;
 
 #[derive(Parser)]
-#[command(name = "keyrock-case-study", version, about = "Keyrock case study")]
+#[command(name = "rust-crypto-orderbook", version, about = "Rust order book aggregator")]
 struct Cli {
-    /// Traded pair to aggregate, e.g. "ethbtc". Overrides KEYROCK_PAIR.
+    /// Traded pair to aggregate, e.g. "ethbtc". Overrides ORDERBOOK_PAIR.
     #[arg(long)]
     pair: Option<String>,
 
-    /// Port the service binds to. Overrides KEYROCK_PORT.
+    /// Port the service binds to. Overrides ORDERBOOK_PORT.
     #[arg(long)]
     port: Option<u16>,
 }

@@ -1,4 +1,4 @@
-# keyrock-case-study as a container:
+# rust-crypto-orderbook as a container:
 #
 #     docker compose up --build       # runs with defaults, logs, exits 0 —
 #                                      # the command step 0's acceptance
@@ -11,17 +11,17 @@
 services:
   app:
     build: .
-    image: keyrock-case-study:local
+    image: rust-crypto-orderbook:local
     # A fixed container_name gives host `docker` commands a stable handle
     # instead of compose's <project>-<service>-<n> form.
-    container_name: keyrock-case-study
+    container_name: rust-crypto-orderbook
 
     env_file:
       - path: .env
         required: false
 
     environment:
-      KEYROCK_LOG_LEVEL: ${KEYROCK_LOG_LEVEL:-info}
+      ORDERBOOK_LOG_LEVEL: ${ORDERBOOK_LOG_LEVEL:-info}
 
     # NOTE FOR ANYONE COMPARING THIS TO THE OTHER PROJECTS IN THIS WORKSPACE:
     # they all join a shared EXTERNAL network named `echo`, which has to be
@@ -36,4 +36,4 @@ services:
     # When a server is added, publish it on loopback only:
     #   ports:
     #     - "127.0.0.1:8080:8080"
-    # and set KEYROCK_HOST=0.0.0.0 so the process binds inside the container.
+    # and set ORDERBOOK_HOST=0.0.0.0 so the process binds inside the container.

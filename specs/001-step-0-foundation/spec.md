@@ -10,7 +10,7 @@ creation_mode: "human-brief"
 source_inputs:
   - "inputs/human.md"
 source_agents: []
-goal: "Land a buildable, containerised, dependency-complete scaffold for the 11-step Keyrock order-book aggregator, adapted from — not layered onto — the pre-existing generic CLI scaffold."
+goal: "Land a buildable, containerised, dependency-complete scaffold for the 11-step order-book aggregator, adapted from — not layered onto — the pre-existing generic CLI scaffold."
 purpose: "Every later step (websocket feeds, merge, gRPC server) needs a crate that already resolves its full dependency graph and already compiles a proto into Rust, so version conflicts and build-pipeline surprises surface once, now, instead of mid-implementation."
 parent_request: "user's step-0 foundation brief, 2026-08-22"
 related_paths:
@@ -36,7 +36,7 @@ complexity: "small"
 
 The repo has a working scaffold (library/binary split, tests, container) built
 *before* the case-study brief was known. It proves the toolchain and test
-harness, but its shape — `hello`/`doctor` subcommands, `KEYROCK_`-prefixed
+harness, but its shape — `hello`/`doctor` subcommands, `ORDERBOOK_`-prefixed
 env-var configuration, a Docker image with nothing to run — has nothing to do
 with the actual problem: a service that will eventually stream a merged
 Binance+Bitstamp order book over gRPC. Step 0 of the 11-step build order
@@ -105,8 +105,8 @@ Verified by reading the files directly, not assumed:
 - **`src/lib.rs`** — `pub mod config; pub mod telemetry;`, a `VERSION` const,
   a placeholder `greeting()` fn with one unit test.
 - **`src/config.rs`** — `Config { log_level, host, port }`, built by
-  `Config::from_env()` reading `KEYROCK_`-prefixed env vars, with
-  `ConfigError::InvalidPort` for an unparseable `KEYROCK_PORT`. No `pair`
+  `Config::from_env()` reading `ORDERBOOK_`-prefixed env vars, with
+  `ConfigError::InvalidPort` for an unparseable `ORDERBOOK_PORT`. No `pair`
   field exists.
 - **`src/telemetry.rs`** — installs a `tracing_subscriber` with the writer
   pinned to stderr, `RUST_LOG` overrides the passed-in filter. Reusable
@@ -114,7 +114,7 @@ Verified by reading the files directly, not assumed:
 - **`src/main.rs`** — clap `Cli` with `Hello { name }` / `Doctor`
   subcommands; calls `Config::from_env()`, then `telemetry::init(...)`.
 - **`tests/cli.rs`** — 4 integration tests: `hello` greets and exits 0,
-  `doctor` reports a `KEYROCK_PORT` override, an invalid `KEYROCK_PORT` fails
+  `doctor` reports a `ORDERBOOK_PORT` override, an invalid `ORDERBOOK_PORT` fails
   loudly, and logs stay off stdout. All 4 assert behaviour that goes away
   with the old CLI shape.
 - **`Dockerfile`** — two-stage build, `rust:1.97-slim-bookworm` builder +
@@ -122,15 +122,14 @@ Verified by reading the files directly, not assumed:
   `COPY Cargo.toml Cargo.lock ./` then stubs `src/main.rs`/`src/lib.rs` only
   — no `build.rs`, no `proto/`. `RUN touch src/main.rs src/lib.rs` before the
   real build is the documented load-bearing trap fix. Installs
-  `ca-certificates` via apt for TLS. `ENTRYPOINT ["keyrock-case-study"]`,
+  `ca-certificates` via apt for TLS. `ENTRYPOINT ["rust-crypto-orderbook"]`,
   `CMD ["--help"]`.
-- **`compose.yml`** — CLI-runner shape (`docker compose run --rm app hello
-  Keyrock`), sets `environment: KEYROCK_LOG_LEVEL: ${KEYROCK_LOG_LEVEL:-info}`,
+- **`compose.yml`** — CLI-runner shape (`docker compose run --rm app hello World`), sets `environment: ORDERBOOK_LOG_LEVEL: ${ORDERBOOK_LOG_LEVEL:-info}`,
   no `ports:`, comments explain why the `echo` network is deliberately not
   joined.
-- **`.env.example`** — templates `KEYROCK_LOG_LEVEL`/`KEYROCK_HOST`/`KEYROCK_PORT`.
+- **`.env.example`** — templates `ORDERBOOK_LOG_LEVEL`/`ORDERBOOK_HOST`/`ORDERBOOK_PORT`.
 - **`README.md`** — documents the `hello`/`doctor` commands and the
-  `KEYROCK_*` env vars; no proto/gRPC mention yet.
+  `ORDERBOOK_*` env vars; no proto/gRPC mention yet.
 - **`.dockerignore`** — already excludes `target/`, `.claude/`, `CLAUDE.md`,
   `specs/`, `docs/`. Correct as-is; no change needed here.
 - **git** — this is not a first commit. There is existing history (currently
@@ -188,11 +187,11 @@ The env-var design in `Config::from_env()` stays — it was a deliberate,
 already-tested choice (`CLAUDE.md`'s "Architecture Facts": "config has a
 working default for every field"), and the human chose to extend it rather
 than replace it. `Config` gains a fifth field, `pair`, read from a new
-`KEYROCK_PAIR` env var, defaulting to `"ethbtc"`. The default `port` changes
+`ORDERBOOK_PAIR` env var, defaulting to `"ethbtc"`. The default `port` changes
 from `8080` to `50051` — the brief's own default, and the port this service
 will actually bind to once the gRPC server exists in a later step, so there's
 no reason for step 0's default to disagree with it. `host`/`log_level` are
-unchanged; `ConfigError::InvalidPort` stays, since `KEYROCK_PORT` is still a
+unchanged; `ConfigError::InvalidPort` stays, since `ORDERBOOK_PORT` is still a
 possible source of an unparseable value that clap never sees.
 
 ```rust
@@ -254,16 +253,16 @@ their precedence, since that's the actual new contract:
   step has no output beyond logs).
 - `--pair btcusd --port 12345` (no env vars) overrides both defaults, logged
   line reflects it.
-- `KEYROCK_PAIR=btcusd KEYROCK_PORT=12345` (no flags) overrides both
+- `ORDERBOOK_PAIR=btcusd ORDERBOOK_PORT=12345` (no flags) overrides both
   defaults via the env path — proves `Config::from_env()` still works, not
   just the new flag-merge code.
-- `KEYROCK_PORT=1` with `--port 12345` given at the same time → the logged
+- `ORDERBOOK_PORT=1` with `--port 12345` given at the same time → the logged
   line shows `12345`, not `1` — proves the flag wins over the env var, which
   is the actual point of this design.
 - An invalid `--port` (e.g. `--port not-a-number`) is rejected by clap with a
   non-zero exit, before `Config` is even built.
-- An invalid `KEYROCK_PORT` with no `--port` flag given still fails loudly
-  via `ConfigError::InvalidPort` and mentions `KEYROCK_PORT` on stderr —
+- An invalid `ORDERBOOK_PORT` with no `--port` flag given still fails loudly
+  via `ConfigError::InvalidPort` and mentions `ORDERBOOK_PORT` on stderr —
   this is the one existing test that carries over almost unchanged, since
   that code path didn't change.
 
@@ -294,7 +293,7 @@ Three changes:
    `apt-get install ca-certificates` line and the `apt-get update`/cleanup
    around it entirely, since nothing else in the runtime stage needs apt.
 3. **`CMD` changes from `["--help"]` to `[]`.** `ENTRYPOINT` stays
-   `["keyrock-case-study"]`. With `CMD ["--help"]`, `docker compose up
+   `["rust-crypto-orderbook"]`. With `CMD ["--help"]`, `docker compose up
    --build` with no override would print help text and exit 0 without ever
    logging the startup line — that would technically exit cleanly but would
    not satisfy "logs the startup line" in acceptance criterion 3. `CMD []`
@@ -304,8 +303,8 @@ Three changes:
 ### `compose.yml`
 
 **Unchanged from the current file** — since `Config::from_env()` is being
-kept (see the config-shape decision above), `environment: KEYROCK_LOG_LEVEL:
-${KEYROCK_LOG_LEVEL:-info}` still wires a variable `Config` actually reads;
+kept (see the config-shape decision above), `environment: ORDERBOOK_LOG_LEVEL:
+${ORDERBOOK_LOG_LEVEL:-info}` still wires a variable `Config` actually reads;
 it was only slated for removal under the rejected "replace Config" option.
 The one edit that still applies: update the file's header comment, which
 currently says "there is no long-running service yet, so there is nothing to
@@ -317,16 +316,16 @@ existing `docker compose run --rm app ...` examples.
 ### `.env.example` — **decided 2026-08-22: keep, and extend it**
 
 Since `Config::from_env()` survives, `.env.example` still documents real,
-read variables. Add a `KEYROCK_PAIR=ethbtc` line alongside the existing
-three, and update the shown `KEYROCK_PORT` default from `8080` to `50051` to
+read variables. Add a `ORDERBOOK_PAIR=ethbtc` line alongside the existing
+three, and update the shown `ORDERBOOK_PORT` default from `8080` to `50051` to
 match the new `Config` default.
 
 ### `README.md`
 
 Update "Quick start" for the new flags (`cargo run -- --pair ethbtc --port
 50051`, and plain `cargo run --` since both have defaults). Update the
-"Configuration" table: keep the `KEYROCK_*` env var rows (still real), add
-`KEYROCK_PAIR` (default `ethbtc`), update `KEYROCK_PORT`'s shown default to
+"Configuration" table: keep the `ORDERBOOK_*` env var rows (still real), add
+`ORDERBOOK_PAIR` (default `ethbtc`), update `ORDERBOOK_PORT`'s shown default to
 `50051`, and add one line stating the precedence decided above — `--pair`/
 `--port` override the matching env var when both are given. Add a
 `proto/orderbook.proto` mention under "Layout." Add a placeholder heading —
@@ -345,7 +344,7 @@ rather than a from-scratch `cargo init`:
 Step 0: add proto schema, tonic build pipeline, and full dependency set
 
 Replace the hello/doctor CLI scaffold with a --pair/--port entry point,
-layered as overrides on the existing KEYROCK_ env-var Config; the real
+layered as overrides on the existing ORDERBOOK_ env-var Config; the real
 websocket and gRPC logic arrive in later steps.
 ```
 
@@ -358,7 +357,7 @@ websocket and gRPC logic arrive in later steps.
   line, and exits cleanly.
 - `cargo test` is green against the new test set described above (the exact
   count depends on how many cases land, but every existing test tied to
-  `hello`/`doctor`/`KEYROCK_*` behaviour is either replaced or removed, not
+  `hello`/`doctor`/`ORDERBOOK_*` behaviour is either replaced or removed, not
   left failing).
 
 ## Invariants and Critical Don'ts
@@ -412,16 +411,16 @@ Required real verification:
   stdout.
 - Run the real binary with `--pair btcusd --port 12345` and confirm the
   logged line reflects both overrides.
-- Run the real binary with `KEYROCK_PAIR`/`KEYROCK_PORT` set and no flags;
+- Run the real binary with `ORDERBOOK_PAIR`/`ORDERBOOK_PORT` set and no flags;
   confirm the env values show up in the logged line.
-- Run the real binary with both a `KEYROCK_PORT` env var and a `--port`
+- Run the real binary with both a `ORDERBOOK_PORT` env var and a `--port`
   flag set to different values; confirm the flag's value wins — this is the
   regression test for the actual precedence decision, not just that each
   input source works in isolation.
 - Run the real binary with an invalid `--port` value and confirm a non-zero
   exit via clap's own type parser.
-- Run the real binary with an invalid `KEYROCK_PORT` and no `--port` flag;
-  confirm a non-zero exit and a stderr message naming `KEYROCK_PORT`, via
+- Run the real binary with an invalid `ORDERBOOK_PORT` and no `--port` flag;
+  confirm a non-zero exit and a stderr message naming `ORDERBOOK_PORT`, via
   `ConfigError::InvalidPort` (unchanged code path).
 - `docker compose up --build` end to end: image builds, container starts,
   the startup log line appears in `docker compose logs`, and the container
@@ -455,10 +454,10 @@ None currently open. All four raised during drafting were answered by the
 human on 2026-08-22 and are reflected directly in Proposed Design above:
 
 - **Config shape** → keep `Config::from_env()`, add a `pair` field
-  (`KEYROCK_PAIR`), CLI flags (`--pair`/`--port`, both `Option<T>`) override
+  (`ORDERBOOK_PAIR`), CLI flags (`--pair`/`--port`, both `Option<T>`) override
   the env-sourced value when given. Default `port` becomes `50051`.
 - **`ca-certificates`** → drop it from the Dockerfile runtime stage now.
-- **`.env.example`** → keep it, extended with `KEYROCK_PAIR` and the new
+- **`.env.example`** → keep it, extended with `ORDERBOOK_PAIR` and the new
   `50051` default (this follows mechanically once Config-shape was decided
   the way it was — `.env.example` documents variables that are still real).
 - **Timeline** → no hard deadline; proceed through all 11 steps in
