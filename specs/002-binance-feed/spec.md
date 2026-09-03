@@ -103,7 +103,7 @@ state — `specs/001-step-0-foundation/`):
   `tracing`/`tracing-subscriber` — everything this step needs is already a
   dependency; nothing new to add.
 - `Config` already has a `pair` field (default `"ethbtc"`) read from
-  `KEYROCK_PAIR` / `--pair`, which this step's feed will consume directly —
+  `ORDERBOOK_PAIR` / `--pair`, which this step's feed will consume directly —
   lowercased, as the endpoint requires.
 - No `src/model.rs` or `src/exchange/` directory exists yet.
 
@@ -193,7 +193,7 @@ binance ethbtc | bid 0.03150000 x 5.00000000 | ask 0.03151000 x 12.50000000 | id
 ```
 
 Full 20-level dumps are never printed — one line per update, best bid/ask
-only, via `tracing` (so it respects `KEYROCK_LOG_LEVEL` and stays on stderr,
+only, via `tracing` (so it respects `ORDERBOOK_LOG_LEVEL` and stays on stderr,
 per the existing stdout/stderr split).
 
 ### `README.md`

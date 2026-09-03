@@ -1,7 +1,6 @@
-# keyrock-case-study
+# rust-crypto-orderbook
 
-A take-home case study for a Rust engineer application at Keyrock. The
-finished service connects to Binance and Bitstamp order-book websocket
+A Rust order book aggregator. The finished service connects to Binance and Bitstamp order-book websocket
 feeds, merges the two books for one traded pair, and streams the spread plus
 the top 10 bids/asks over gRPC (`proto/orderbook.proto`).
 
@@ -135,16 +134,16 @@ reachable from them.
 
 ## Configuration
 
-Every setting can be given two ways: a CLI flag or a `KEYROCK_`-prefixed
+Every setting can be given two ways: a CLI flag or a `ORDERBOOK_`-prefixed
 environment variable, both with working defaults — the binary runs with no
 flags and no environment at all.
 
 | Setting | Flag | Env var | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| Pair | `--pair` | `KEYROCK_PAIR` | `ethbtc` | Traded pair the Binance feed subscribes to; not yet used by the gRPC server (fake data until step 3). |
-| Port | `--port` | `KEYROCK_PORT` | `50051` | Port the gRPC server binds. An unparseable `KEYROCK_PORT` is a startup error. |
-| Log level | — | `KEYROCK_LOG_LEVEL` | `info` | `RUST_LOG`-style filter; an explicit `RUST_LOG` wins over this. |
-| Host | — | `KEYROCK_HOST` | `127.0.0.1` | Bind address for the gRPC server. Use `0.0.0.0` in a container. |
+| Pair | `--pair` | `ORDERBOOK_PAIR` | `ethbtc` | Traded pair the Binance feed subscribes to; not yet used by the gRPC server (fake data until step 3). |
+| Port | `--port` | `ORDERBOOK_PORT` | `50051` | Port the gRPC server binds. An unparseable `ORDERBOOK_PORT` is a startup error. |
+| Log level | — | `ORDERBOOK_LOG_LEVEL` | `info` | `RUST_LOG`-style filter; an explicit `RUST_LOG` wins over this. |
+| Host | — | `ORDERBOOK_HOST` | `127.0.0.1` | Bind address for the gRPC server. Use `0.0.0.0` in a container. |
 
 **A CLI flag overrides its matching env var when both are given.**
 `--pair`/`--port` are the only two settings exposed as flags; log level and
@@ -195,7 +194,7 @@ installs `protobuf-compiler` itself — no host setup required. The runtime
 stage skips `ca-certificates`: `tokio-tungstenite`'s
 `rustls-tls-webpki-roots` feature bundles its own root certs.
 
-The container binds `0.0.0.0` internally (`KEYROCK_HOST=0.0.0.0`, set in
+The container binds `0.0.0.0` internally (`ORDERBOOK_HOST=0.0.0.0`, set in
 `compose.yml`) and publishes `127.0.0.1:50051` on the host, loopback only.
 With the container able to reach Binance (directly, or via the
 `PROXY_HOST`/`PROXY_PORT` pass-through in `.env` — see Configuration

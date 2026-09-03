@@ -2,9 +2,9 @@
 //! client, real TCP/HTTP2 connection, no mocking, per the standing
 //! convention recorded in `specs/002-binance-feed/revisions.md` entry 3.
 
-use keyrock_case_study::orderbook::Empty;
-use keyrock_case_study::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
-use keyrock_case_study::server;
+use rust_crypto_orderbook::orderbook::Empty;
+use rust_crypto_orderbook::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
+use rust_crypto_orderbook::server;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_stream::wrappers::TcpListenerStream;
