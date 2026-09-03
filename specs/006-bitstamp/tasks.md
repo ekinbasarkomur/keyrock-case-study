@@ -405,8 +405,8 @@ unused free function would be a clippy `dead_code` warning, which fails the
   `futures_util::{SinkExt, StreamExt}` — note `SinkExt` is newly needed here
   for `.send(...)` on the subscribe message, which the current
   `src/main.rs` doesn't need since Binance never sends anything post-connect,
-  `keyrock_case_study::exchange::{Exchange, Venue}`, `keyrock_case_study::model::Book`,
-  `keyrock_case_study::proxy::{self, parse_proxy_addr}`, `tokio::sync::mpsc`,
+  `rust_crypto_orderbook::exchange::{Exchange, Venue}`, `rust_crypto_orderbook::model::Book`,
+  `rust_crypto_orderbook::proxy::{self, parse_proxy_addr}`, `tokio::sync::mpsc`,
   `tokio_tungstenite::tungstenite::Message`, `tokio_tungstenite::{client_async_tls, connect_async}`,
   `tracing::{debug, info, warn}`).
 
@@ -422,12 +422,12 @@ compile without `src/main.rs`'s updated call site.
 **Change:**
 - Delete the entire `run_feed` function and the `proxy_addr` function from
   this file — both now live in `src/feed.rs`.
-- Add `use keyrock_case_study::exchange::binance::Binance;` (or the
+- Add `use rust_crypto_orderbook::exchange::binance::Binance;` (or the
   equivalent path once Task 2.2 lands `Binance` as a struct) and
-  `use keyrock_case_study::feed;`.
+  `use rust_crypto_orderbook::feed;`.
 - Remove now-unused imports this file no longer needs directly (`futures_util::StreamExt`,
   `tokio_tungstenite::tungstenite::Message`, `tokio_tungstenite::{client_async_tls, connect_async}`,
-  `keyrock_case_study::proxy::{self, parse_proxy_addr}`, `tracing::{debug, warn}`
+  `rust_crypto_orderbook::proxy::{self, parse_proxy_addr}`, `tracing::{debug, warn}`
   if `warn`/`debug` are no longer used elsewhere in this file) — confirm via
   `cargo clippy --all-targets -- -D warnings`, which will flag any leftover
   unused import as an error under this project's warnings-are-errors gate.
@@ -691,7 +691,7 @@ state.
 **Files:** `src/main.rs`
 
 **Change:**
-- Add `use keyrock_case_study::exchange::bitstamp::Bitstamp;`.
+- Add `use rust_crypto_orderbook::exchange::bitstamp::Bitstamp;`.
 - Clone `feed_tx` once more (one `mpsc::Sender`, cloned for two producers):
   ```rust
   let binance_tx = feed_tx.clone();

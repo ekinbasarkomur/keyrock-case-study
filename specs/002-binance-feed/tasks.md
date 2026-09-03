@@ -73,7 +73,7 @@ in the new module.
   - `cargo build` succeeds.
   - `cargo clippy --all-targets -- -D warnings` clean.
 - Done when:
-  - `Book` compiles and is reachable as `keyrock_case_study::model::Book`
+  - `Book` compiles and is reachable as `rust_crypto_orderbook::model::Book`
     from outside the crate (confirmed in task 1.3's test module via
     `use crate::model::...`).
 
@@ -358,7 +358,7 @@ Phases 1-2).
 - Change: none.
 - Verification:
   - Set `tungstenite`/`tokio-tungstenite` logging to `trace` level for this
-    run specifically (e.g. `RUST_LOG=keyrock_case_study=info,tungstenite=trace,tokio_tungstenite=trace`
+    run specifically (e.g. `RUST_LOG=rust_crypto_orderbook=info,tungstenite=trace,tokio_tungstenite=trace`
     or the project's equivalent env-var convention) and run
     `cargo run -- --pair ethbtc` against the real Binance endpoint
     continuously for at least 25 minutes, without restarting the process.
