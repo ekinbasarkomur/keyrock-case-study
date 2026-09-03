@@ -24,7 +24,7 @@ compensate.
     `http://127.0.0.1:50051`), matching `src/main.rs`'s existing `clap`
     convention.
   - Connect via
-    `keyrock_case_study::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient`,
+    `rust_crypto_orderbook::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient`,
     reachable through `lib.rs`'s existing `pub mod orderbook` re-export — no
     library change needed.
   - Reconnection loop, exactly the flat form from spec.md — no backoff, no
@@ -87,8 +87,8 @@ compensate.
 - Files or areas: `Dockerfile`
 - Change: add one `COPY --from=builder /build/target/release/client
   /usr/local/bin/client` line alongside the existing
-  `keyrock-case-study` binary copy in the runtime stage. Do not touch
-  `ENTRYPOINT` (`["keyrock-case-study"]` stays as-is — `docker compose run
+  `rust-crypto-orderbook` binary copy in the runtime stage. Do not touch
+  `ENTRYPOINT` (`["rust-crypto-orderbook"]` stays as-is — `docker compose run
   --rm app --pair btcusd` depends on args passing through to the server
   binary unchanged).
 - Verification:
@@ -96,7 +96,7 @@ compensate.
     misnamed `COPY` line fails at container start, not at `cargo build`
     time — there is no build-time check for this on its own).
 - Done when:
-  - The built image contains both `/usr/local/bin/keyrock-case-study` and
+  - The built image contains both `/usr/local/bin/rust-crypto-orderbook` and
     `/usr/local/bin/client`, confirmed indirectly by task 4's compose run
     succeeding for both services.
 
@@ -106,7 +106,7 @@ compensate.
 - Change: add a second service:
   ```yaml
   client:
-    image: keyrock-case-study:local
+    image: rust-crypto-orderbook:local
     entrypoint: ["client"]
     command: ["--addr", "http://app:50051"]
     depends_on: [app]
@@ -161,7 +161,7 @@ compensate.
   - With a server running locally
     (`cargo run -- --pair ethbtc --port 50051`), run
     `cargo run --bin client -- --addr http://127.0.0.1:50051 >
-    /private/tmp/claude-501/-Users-ekinbasarkomur-projects-keyrock-case-study/171ee52b-46ec-42ce-8b19-7a11cee41686/scratchpad/client-out.txt`,
+    /private/tmp/claude-501/-Users-ekinbasarkomur-projects-rust-crypto-orderbook/171ee52b-46ec-42ce-8b19-7a11cee41686/scratchpad/client-out.txt`,
     let it run for a few seconds, then stop it (Ctrl-C or kill).
   - Inspect the file (`cat` or `Read`) and confirm it contains clean,
     readable text — book levels, spread, update rate — with no `\x1b[`

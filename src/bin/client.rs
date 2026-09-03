@@ -1,4 +1,4 @@
-//! keyrock-case-study client — a demonstration terminal viewer.
+//! rust-crypto-orderbook client — a demonstration terminal viewer.
 //!
 //! Connects to the gRPC server (`src/server.rs`) and redraws the combined
 //! book in place, like `top`. This is not part of the service — it exists
@@ -6,7 +6,7 @@
 //! reconnection/staleness work has an instrument that makes it visible on
 //! screen rather than only in logs.
 //!
-//! Reachable via `keyrock_case_study::orderbook`, the generated proto module
+//! Reachable via `rust_crypto_orderbook::orderbook`, the generated proto module
 //! `src/lib.rs` already re-exports — no library change was needed to add
 //! this binary.
 
@@ -15,10 +15,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use clap::Parser;
-use keyrock_case_study::exchange::Venue;
-use keyrock_case_study::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
-use keyrock_case_study::orderbook::{Empty, Level, Summary};
-use keyrock_case_study::telemetry;
+use rust_crypto_orderbook::exchange::Venue;
+use rust_crypto_orderbook::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient;
+use rust_crypto_orderbook::orderbook::{Empty, Level, Summary};
+use rust_crypto_orderbook::telemetry;
 use tokio::time::sleep;
 use tokio_stream::StreamExt;
 use tracing::{info, warn};
@@ -35,7 +35,7 @@ const ROWS: usize = 10;
 const VENUES: [Venue; 2] = [Venue::Binance, Venue::Bitstamp];
 
 #[derive(Parser)]
-#[command(name = "client", version, about = "keyrock-case-study demo client")]
+#[command(name = "client", version, about = "rust-crypto-orderbook demo client")]
 struct Cli {
     /// gRPC server address, e.g. http://127.0.0.1:50051.
     #[arg(long, default_value = "http://127.0.0.1:50051")]

@@ -173,7 +173,7 @@ end of this phase — `server.rs` is built and proven to compile in isolation.
 - Change: Add `pub mod server;` alongside the existing module declarations —
   do not reorder or remove any existing `pub mod` line.
 - Verification: `cargo build` succeeds with `src/server.rs` reachable as
-  `keyrock_case_study::server::...`.
+  `rust_crypto_orderbook::server::...`.
 - Done when: `src/server.rs` is a compiling, reachable module.
 
 ### 2.5 Full green check for Phase 2
@@ -336,7 +336,7 @@ the integration test without touching any shipped code.
 
 ### 5.1 Bind the container to all interfaces and publish the port
 - Files or areas: `compose.yml`
-- Change: Set `KEYROCK_HOST=0.0.0.0` in the container's `environment:` block.
+- Change: Set `ORDERBOOK_HOST=0.0.0.0` in the container's `environment:` block.
   Add `127.0.0.1:50051:50051` under `ports:` — host-loopback only, never
   `0.0.0.0:50051:50051`. Confirm — do not re-add — that the existing
   `PROXY_HOST`/`PROXY_PORT` → `HTTP_PROXY`/`HTTPS_PROXY` pass-through block
@@ -347,7 +347,7 @@ the integration test without touching any shipped code.
   - `docker compose build` succeeds.
   - `grep -n "PROXY_HOST\|PROXY_PORT\|HTTP_PROXY\|HTTPS_PROXY" compose.yml`
     shows the pass-through block unchanged from before this task.
-- Done when: `compose.yml` sets `KEYROCK_HOST=0.0.0.0`, publishes
+- Done when: `compose.yml` sets `ORDERBOOK_HOST=0.0.0.0`, publishes
   `127.0.0.1:50051:50051`, and the proxy pass-through block is confirmed
   intact by the grep above.
 
