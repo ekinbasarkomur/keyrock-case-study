@@ -223,7 +223,7 @@ Verified by reading the source, not assumed:
 ### Decided — the three smaller Open Questions
 
 - **Symbol format: build a general converter**, not a hardcoded
-  `"ETH/BTC"`. Given `--pair`/`KEYROCK_PAIR`'s existing shape (a lowercase
+  `"ETH/BTC"`. Given `--pair`/`ORDERBOOK_PAIR`'s existing shape (a lowercase
   concatenated token, e.g. `"ethbtc"`), and that Binance/Bitstamp both
   already lowercase/reuse that same token directly with no base/quote
   split needed, Kraken's converter needs a real rule for where the split

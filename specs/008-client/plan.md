@@ -49,7 +49,7 @@ listing `cargo test` as if it covered the new behaviour.
   - `src/bin/client.rs` (new, picked up automatically by Cargo — no
     `[[bin]]` section): `--addr` CLI flag via `clap::Parser`, matching
     `src/main.rs`'s existing convention. Connects using
-    `keyrock_case_study::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient`
+    `rust_crypto_orderbook::orderbook::orderbook_aggregator_client::OrderbookAggregatorClient`
     (reachable because `src/lib.rs` already re-exports `pub mod orderbook`
     — confirmed by reading `src/lib.rs` before writing this plan). Redraw-
     in-place rendering (`\x1b[H` cursor home, `\x1b[K` clear-to-end-of-line
@@ -76,11 +76,11 @@ listing `cargo test` as if it covered the new behaviour.
     fill in per-venue status later without restructuring this function. Not
     building the status indicators themselves this step.
   - `Dockerfile`: one `COPY --from=builder /build/target/release/client
-    /usr/local/bin/client` line alongside the existing `keyrock-case-study`
+    /usr/local/bin/client` line alongside the existing `rust-crypto-orderbook`
     binary copy. `ENTRYPOINT` for the `app` service stays
-    `["keyrock-case-study"]` — unchanged, since `docker compose run --rm
+    `["rust-crypto-orderbook"]` — unchanged, since `docker compose run --rm
     app --pair btcusd` relies on args passing through to the server binary.
-  - `compose.yml`: new `client` service — `image: keyrock-case-study:local`
+  - `compose.yml`: new `client` service — `image: rust-crypto-orderbook:local`
     (not `build:` — shares the image the `app` service builds),
     `entrypoint: ["client"]`, `command: ["--addr", "http://app:50051"]`,
     `depends_on: [app]`, `tty: true`. A comment noting that if `app` exits
@@ -203,7 +203,7 @@ listing `cargo test` as if it covered the new behaviour.
   step. A phase whose diff unexpectedly touches any of these is a
   stop-and-flag condition, checked at both phase boundaries above, not just
   the end.
-- **`ENTRYPOINT` for `app` stays `["keyrock-case-study"]`.** The client is
+- **`ENTRYPOINT` for `app` stays `["rust-crypto-orderbook"]`.** The client is
   wired entirely at the compose service level (`entrypoint: ["client"]`
   overriding only the `client` service), never by changing the shared
   image's default entrypoint — changing that would break `docker compose
