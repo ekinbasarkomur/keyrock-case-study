@@ -1,7 +1,6 @@
-# keyrock-case-study
+# rust-crypto-orderbook
 
-A take-home case study for a Rust engineer application at Keyrock. The
-finished service connects to Binance and Bitstamp order-book websocket
+A Rust order book aggregator. The finished service connects to Binance and Bitstamp order-book websocket
 feeds, merges the two books for one traded pair, and streams the spread plus
 the top 10 bids/asks over gRPC (`proto/orderbook.proto`).
 
@@ -48,8 +47,8 @@ signature change.
 ```sh
 docker compose up --build               # server, containerised, zero setup
 docker compose run --rm client          # watch the merged book (see Client)
-cargo run --bin keyrock-case-study --   # defaults: --pair ethbtc --port 50051
-cargo run --bin keyrock-case-study -- --pair btcusd --port 12345
+cargo run --bin rust-crypto-orderbook --   # defaults: --pair ethbtc --port 50051
+cargo run --bin rust-crypto-orderbook -- --pair btcusd --port 12345
 ```
 
 `--bin` is required now that this crate builds two binaries — the server and
@@ -206,18 +205,18 @@ crate, so logic in `main.rs` isn't reachable from it.
 
 ## Configuration
 
-Every setting works from a CLI flag or a `KEYROCK_`-prefixed env var, both
+Every setting works from a CLI flag or a `ORDERBOOK_`-prefixed env var, both
 with defaults. Copy `.env.example` to `.env` to set them without exporting
 by hand.
 
 | Setting | Flag | Env var | Default |
 | --- | --- | --- | --- |
-| Pair | `--pair` | `KEYROCK_PAIR` | `ethbtc` |
-| Port | `--port` | `KEYROCK_PORT` | `50051` |
-| Log level | — | `KEYROCK_LOG_LEVEL` | `info` (`RUST_LOG` wins if set) |
-| Host | — | `KEYROCK_HOST` | `127.0.0.1` (use `0.0.0.0` in a container) |
+| Pair | `--pair` | `ORDERBOOK_PAIR` | `ethbtc` |
+| Port | `--port` | `ORDERBOOK_PORT` | `50051` |
+| Log level | — | `ORDERBOOK_LOG_LEVEL` | `info` (`RUST_LOG` wins if set) |
+| Host | — | `ORDERBOOK_HOST` | `127.0.0.1` (use `0.0.0.0` in a container) |
 
-A CLI flag overrides its matching env var; an unparseable `KEYROCK_PORT` is a
+A CLI flag overrides its matching env var; an unparseable `ORDERBOOK_PORT` is a
 startup error. If `HTTPS_PROXY`/`HTTP_PROXY` is set, both feeds tunnel
 through it via an HTTP `CONNECT` handshake — `compose.yml` builds this from
 `PROXY_HOST`/`PROXY_PORT` in `.env`. Unset, behavior is unchanged.

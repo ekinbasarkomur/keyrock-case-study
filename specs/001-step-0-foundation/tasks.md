@@ -122,10 +122,10 @@ builder image.
   - Add a `pub pair: String` field to `Config`.
   - `Default for Config`: `pair: "ethbtc".to_string()`, `port: 50051` (was
     `8080`). `host`/`log_level` defaults unchanged.
-  - `Config::from_env()`: read `KEYROCK_PAIR` (via the existing `ENV_PREFIX`
-    constant) the same way `KEYROCK_HOST`/`KEYROCK_LOG_LEVEL` are read today
+  - `Config::from_env()`: read `ORDERBOOK_PAIR` (via the existing `ENV_PREFIX`
+    constant) the same way `ORDERBOOK_HOST`/`ORDERBOOK_LOG_LEVEL` are read today
     (`env::var(...).unwrap_or(defaults.pair)`), falling back to the default
-    when unset. `KEYROCK_PORT` parsing/error path (`ConfigError::InvalidPort`)
+    when unset. `ORDERBOOK_PORT` parsing/error path (`ConfigError::InvalidPort`)
     is unchanged.
   - Update the two existing unit tests in `src/config.rs`'s `mod tests`:
     `defaults_are_usable_with_no_environment` asserts `c.port == 50051` (was
@@ -137,7 +137,7 @@ builder image.
     assertions.
 - Done when:
   - `Config` has five fields (`log_level`, `host`, `port`, `pair`), defaults
-    to `port: 50051, pair: "ethbtc"`, and `KEYROCK_PAIR` is readable via
+    to `port: 50051, pair: "ethbtc"`, and `ORDERBOOK_PAIR` is readable via
     `from_env()`.
 
 ### 2.2 Replace `src/main.rs`'s subcommand CLI with the flat `--pair`/`--port` entry point
@@ -187,22 +187,22 @@ builder image.
   `invalid_port_fails_loudly_rather_than_defaulting`,
   `logs_go_to_stderr_not_stdout`) with the 6 cases from `spec.md`'s Testing
   Strategy, each invoking the real binary via
-  `env!("CARGO_BIN_EXE_keyrock-case-study")`:
+  `env!("CARGO_BIN_EXE_rust-crypto-orderbook")`:
   1. No flags, no relevant env vars: exit 0, stderr contains
      `pair=ethbtc` and `port=50051`, stdout is empty.
   2. `--pair btcusd --port 12345`, no env vars: exit 0, stderr reflects both
      overrides.
-  3. `KEYROCK_PAIR=btcusd KEYROCK_PORT=12345` set, no flags: exit 0, stderr
+  3. `ORDERBOOK_PAIR=btcusd ORDERBOOK_PORT=12345` set, no flags: exit 0, stderr
      reflects both env-sourced overrides (proves `Config::from_env()` still
      works standalone).
-  4. `KEYROCK_PORT=1` set **and** `--port 12345` passed together: stderr
+  4. `ORDERBOOK_PORT=1` set **and** `--port 12345` passed together: stderr
      shows `12345`, not `1` — the precedence regression test; this is the
      single most important case in this task, don't skip or weaken it.
   5. `--port not-a-number`: non-zero exit, rejected by clap before `Config`
      is constructed (assert on stderr mentioning the arg parse failure, not
-     `KEYROCK_PORT`).
-  6. `KEYROCK_PORT=not-a-number`, no `--port` flag: non-zero exit, stderr
-     contains `KEYROCK_PORT` (via `ConfigError::InvalidPort` — this is the
+     `ORDERBOOK_PORT`).
+  6. `ORDERBOOK_PORT=not-a-number`, no `--port` flag: non-zero exit, stderr
+     contains `ORDERBOOK_PORT` (via `ConfigError::InvalidPort` — this is the
      one case that's a near-direct carryover of the old
      `invalid_port_fails_loudly_rather_than_defaulting` test).
   Keep the existing module doc comment explaining why `tests/` is the truth
@@ -278,7 +278,7 @@ changes in this phase.
   in the runtime stage uses apt, so no apt block is needed at all.
 - Verification:
   - `docker compose build` still succeeds without the apt step.
-  - `docker history keyrock-case-study:local` (or equivalent) shows no apt
+  - `docker history rust-crypto-orderbook:local` (or equivalent) shows no apt
     layer in the runtime stage.
 - Done when:
   - The runtime stage contains no `apt-get` invocation.
@@ -286,7 +286,7 @@ changes in this phase.
 ### 3.3 Fix `CMD` so the container logs the startup line instead of printing help
 - Files or areas: `Dockerfile`
 - Change: Change `CMD ["--help"]` to `CMD []`. `ENTRYPOINT
-  ["keyrock-case-study"]` is unchanged. With no `command:` override in
+  ["rust-crypto-orderbook"]` is unchanged. With no `command:` override in
   `compose.yml`, this resolves to running the binary with no arguments, which
   uses the CLI's own defaults (`pair=ethbtc port=50051`) and produces the real
   startup log line rather than help text.
@@ -325,7 +325,7 @@ changes in this phase.
   - `docker compose logs` shows the startup line (containing
     `pair=ethbtc port=50051`, matching what Phase 2 proved on the host).
   - Container exits with status 0 (`docker compose ps -a` or `docker inspect
-    --format '{{.State.ExitCode}}' keyrock-case-study` reads `0`).
+    --format '{{.State.ExitCode}}' rust-crypto-orderbook` reads `0`).
 - Done when:
   - All three checks above hold with no manual `command:` override.
 
@@ -336,12 +336,12 @@ changes in this phase.
   compose up --build` as a valid way to run the binary once (it starts, logs,
   and exits — still not a server), alongside the existing `docker compose run
   --rm app <cmd>` examples. No other change to `compose.yml` — the
-  `KEYROCK_LOG_LEVEL` environment wiring and the "stays off external
+  `ORDERBOOK_LOG_LEVEL` environment wiring and the "stays off external
   networks" comment block are unchanged, since `Config::from_env()` was kept
   (per `spec.md`'s decided config shape), not replaced.
 - Verification:
   - Read the updated comment back; confirm `docker compose run --rm app
-    hello Keyrock` is NOT left as a still-implied example anywhere (that
+    hello World` is NOT left as a still-implied example anywhere (that
     subcommand no longer exists after Phase 2).
 - Done when:
   - The comment block accurately describes both `docker compose run --rm app
@@ -349,20 +349,20 @@ changes in this phase.
     invocations, with no reference to the removed `hello`/`doctor`
     subcommands.
 
-### 3.7 Extend `.env.example` for `KEYROCK_PAIR` and the new port default
+### 3.7 Extend `.env.example` for `ORDERBOOK_PAIR` and the new port default
 - Files or areas: `.env.example`
-- Change: Add a `KEYROCK_PAIR=ethbtc` line (with a one-line comment, matching
+- Change: Add a `ORDERBOOK_PAIR=ethbtc` line (with a one-line comment, matching
   the existing style, noting it's the traded pair the aggregator will
   eventually stream — step 0 just plumbs the config field). Change the shown
-  `KEYROCK_PORT=8080` to `KEYROCK_PORT=50051` to match the new `Config`
+  `ORDERBOOK_PORT=8080` to `ORDERBOOK_PORT=50051` to match the new `Config`
   default from task 2.1.
 - Verification:
-  - `diff <(grep KEYROCK_ .env.example) <(cat src/config.rs | grep -o 'KEYROCK_[A-Z_]*')`
-    or an equivalent manual check confirming every `KEYROCK_*` variable read
+  - `diff <(grep ORDERBOOK_ .env.example) <(cat src/config.rs | grep -o 'ORDERBOOK_[A-Z_]*')`
+    or an equivalent manual check confirming every `ORDERBOOK_*` variable read
     by `Config::from_env()` (`LOG_LEVEL`, `HOST`, `PORT`, `PAIR`) has a
     corresponding line in `.env.example`.
 - Done when:
-  - `.env.example` has four `KEYROCK_*` lines (`LOG_LEVEL`, `HOST`, `PORT`,
+  - `.env.example` has four `ORDERBOOK_*` lines (`LOG_LEVEL`, `HOST`, `PORT`,
     `PAIR`), with `PORT` defaulting to `50051`.
 
 ### 3.8 Re-run `cargo test` after container-only edits
@@ -388,7 +388,7 @@ changes in this phase.
 - Change: Replace any `hello`/`doctor` command examples with
   `cargo run -- --pair ethbtc --port 50051` and plain `cargo run --` (both
   valid now that both flags default). Replace
-  `docker compose run --rm app hello Keyrock` with the equivalent using the
+  `docker compose run --rm app hello World` with the equivalent using the
   new binary (e.g. `docker compose run --rm app --pair ethbtc --port 50051`
   and `docker compose up --build`).
 - Verification: covered by task 4.4 below (every command shown gets actually
@@ -400,11 +400,11 @@ changes in this phase.
 ### 4.2 Update the README configuration table and add precedence + proto notes
 - Files or areas: `README.md`
 - Change:
-  - In the configuration/env-var table: keep the existing `KEYROCK_LOG_LEVEL`
-    / `KEYROCK_HOST` rows, add a `KEYROCK_PAIR` row (default `ethbtc`), and
-    change the shown `KEYROCK_PORT` default from `8080` to `50051`.
+  - In the configuration/env-var table: keep the existing `ORDERBOOK_LOG_LEVEL`
+    / `ORDERBOOK_HOST` rows, add a `ORDERBOOK_PAIR` row (default `ethbtc`), and
+    change the shown `ORDERBOOK_PORT` default from `8080` to `50051`.
   - Add one sentence stating the precedence rule: `--pair`/`--port` override
-    the matching `KEYROCK_*` env var when both are given.
+    the matching `ORDERBOOK_*` env var when both are given.
   - Add a one-line mention of `proto/orderbook.proto` under whatever section
     documents repo layout (e.g. "Layout" or "Project structure").
   - Add a placeholder heading "What would change for production" with no
