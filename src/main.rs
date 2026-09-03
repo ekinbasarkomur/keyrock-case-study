@@ -1,4 +1,4 @@
-//! keyrock-case-study — CLI entry point.
+//! rust-crypto-orderbook — CLI entry point.
 //!
 //! Deliberately thin: parse arguments, initialise logging, delegate. Anything
 //! worth testing belongs in the library crate (`src/lib.rs`), which the
@@ -12,9 +12,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures_util::StreamExt;
-use keyrock_case_study::exchange::binance;
-use keyrock_case_study::proxy::parse_proxy_addr;
-use keyrock_case_study::{config::Config, telemetry};
+use rust_crypto_orderbook::exchange::binance;
+use rust_crypto_orderbook::proxy::parse_proxy_addr;
+use rust_crypto_orderbook::{config::Config, telemetry};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
@@ -22,13 +22,13 @@ use tokio_tungstenite::{client_async_tls, connect_async};
 use tracing::{debug, info, warn};
 
 #[derive(Parser)]
-#[command(name = "keyrock-case-study", version, about = "Keyrock case study")]
+#[command(name = "rust-crypto-orderbook", version, about = "Rust order book aggregator")]
 struct Cli {
-    /// Traded pair to aggregate, e.g. "ethbtc". Overrides KEYROCK_PAIR.
+    /// Traded pair to aggregate, e.g. "ethbtc". Overrides ORDERBOOK_PAIR.
     #[arg(long)]
     pair: Option<String>,
 
-    /// Port the service binds to. Overrides KEYROCK_PORT.
+    /// Port the service binds to. Overrides ORDERBOOK_PORT.
     #[arg(long)]
     port: Option<u16>,
 }

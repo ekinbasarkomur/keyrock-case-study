@@ -1,7 +1,6 @@
-# keyrock-case-study
+# rust-crypto-orderbook
 
-A take-home case study for a Rust engineer application at Keyrock. The
-finished service connects to Binance and Bitstamp order-book websocket
+A Rust order book aggregator. The finished service connects to Binance and Bitstamp order-book websocket
 feeds, merges the two books for one traded pair, and streams the spread plus
 the top 10 bids/asks over gRPC (`proto/orderbook.proto`).
 
@@ -76,16 +75,16 @@ reachable from them.
 
 ## Configuration
 
-Every setting can be given two ways: a CLI flag or a `KEYROCK_`-prefixed
+Every setting can be given two ways: a CLI flag or a `ORDERBOOK_`-prefixed
 environment variable, both with working defaults — the binary runs with no
 flags and no environment at all.
 
 | Setting | Flag | Env var | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| Pair | `--pair` | `KEYROCK_PAIR` | `ethbtc` | Traded pair, once feed/merge logic lands. |
-| Port | `--port` | `KEYROCK_PORT` | `50051` | Port the service will bind, once the gRPC server exists. An unparseable `KEYROCK_PORT` is a startup error. |
-| Log level | — | `KEYROCK_LOG_LEVEL` | `info` | `RUST_LOG`-style filter; an explicit `RUST_LOG` wins over this. |
-| Host | — | `KEYROCK_HOST` | `127.0.0.1` | Bind address for the eventual server. Use `0.0.0.0` in a container. |
+| Pair | `--pair` | `ORDERBOOK_PAIR` | `ethbtc` | Traded pair, once feed/merge logic lands. |
+| Port | `--port` | `ORDERBOOK_PORT` | `50051` | Port the service will bind, once the gRPC server exists. An unparseable `ORDERBOOK_PORT` is a startup error. |
+| Log level | — | `ORDERBOOK_LOG_LEVEL` | `info` | `RUST_LOG`-style filter; an explicit `RUST_LOG` wins over this. |
+| Host | — | `ORDERBOOK_HOST` | `127.0.0.1` | Bind address for the eventual server. Use `0.0.0.0` in a container. |
 
 **A CLI flag overrides its matching env var when both are given.**
 `--pair`/`--port` are the only two settings exposed as flags; log level and
